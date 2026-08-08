@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<title>TIMER IMPOSTER</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg: #0a0d0b;
+    --panel: #12160f0f, #131813;
+    --panel-solid: #12160f;
+    --line: #263028;
+    --ink: #e8ede6;
+    --muted: #7c8a7c;
+    --green: #4dff9c;
+    --green-dim: #2c6b48;
+    --red: #ff5a5a;
+    --amber: #ffb84d;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color: transparent;}
+  html,body{height:100%;}
+  body{
+    margin:0;
+    background:
+      radial-gradient(1200px 600px at 50% -10%, #10160f 0%, var(--bg) 60%);
+    color:var(--ink);
+    font-family:'Barlow Condensed', sans-serif;
+    display:flex;
+    align-items:stretch;
+    justify-content:center;
+    min-height:100vh;
+    min-height:100dvh;
+    overflow-x:hidden;
+  }
+  #app{
+    width:100%;
+    max-width:520px;
+    display:flex;
+    flex-direction:column;
+    min-height:100vh;
+    min-height:100dvh;
+    padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+    position:relative;
+  }
+  /* scanline texture */
+  #app::before{
+    content:"";
+    position:fixed; inset:0;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,0.015) 0px, rgba(255,255,255,0.015) 1px, transparent 1px, transparent 3px);
+    pointer-events:none;
+    z-index:0;
+  }
+  .screen{
+    position:relative;
+    z-index:1;
+    flex:1;
+    display:flex;
+    flex-direction:column;
+    animation: fadein .35s ease both;
+  }
+  @keyframes fadein{ from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:translateY(0);} }
+  @media (prefers-reduced-motion: reduce){
+    *{animation-duration:.001s !important; transition-duration:.001s !important;}
+  }
+
+  .eyebrow{
+    font-family:'Space Mono', monospace;
+    font-size:11px;
+    letter-spacing:.28em;
+    text-transform:uppercase;
+    color:var(--green);
+    display:flex;
+    align-items:center;
+    gap:8px;
+  }
+  .eyebrow::before{
+    content:"";
+    width:6px; height:6px;
+    background:var(--green);
+    box-shadow:0 0 8px var(--green);
+    border-radius:1px;
+    flex:none;
+  }
+
+  h1{
+    font-family:'Barlow Condensed', sans-serif;
+    font-weight:700;
+    letter-spacing:.02em;
+    text-transform:uppercase;
+    margin: 10px 0 4px;
+    line-height:.95;
+  }
+  .title-main{ font-size: clamp(44px, 13vw, 64px); }
+  p.sub{ color:var(--muted); font-size:16px; line-height:1.4; margin:0 0 0; }
+
+  .stamp{
+    display:inline-block;
+    border:2px solid currentColor;
+    padding:3px 10px;
+    font-family:'Space Mono', monospace;
+    font-size:12px;
+    letter-spacing:.18em;
+    text-transform:uppercase;
+    transform: rotate(-3deg);
+    border-radius:2px;
+  }
+
+  .spacer{flex:1;}
+
+  .btn{
+    font-family:'Barlow Condensed', sans-serif;
+    font-weight:700;
+    text-transform:uppercase;
+    letter-spacing:.06em;
+    font-size:19px;
+    border-radius:6px;
+    border:2px solid var(--green);
+    background:transparent;
+    color:var(--green);
+    padding:16px 20px;
+    width:100%;
+    cursor:pointer;
+    transition: transform .12s ease, background .15s ease, color .15s ease;
+    -webkit-user-select:none; user-select:none;
+  }
+  .btn:active{ transform:scale(.97); }
+  .btn:focus-visible{ outline:2px solid var(--green); outline-offset:3px; }
+  .btn.solid{ background:var(--green); color:#04140a; }
+  .btn.ghost{ border-color:var(--line); color:var(--muted); }
+  .btn.danger{ border-color:var(--red); color:var(--red); }
+  .btn[disabled]{ opacity:.35; pointer-events:none; }
+
+  .card{
+    background: linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:20px;
+  }
+
+  /* Setup stepper */
+  .stepper{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:22px;
+    margin: 28px 0;
+  }
+  .stepper button{
+    width:56px; height:56px;
+    border-radius:50%;
+    border:2px solid var(--green);
+    background:transparent;
+    color:var(--green);
+    font-size:26px;
+    font-family:'Space Mono', monospace;
+    cursor:pointer;
+  }
+  .stepper button:active{ background:rgba(77,255,156,.12); }
+  .stepper button[disabled]{ opacity:.3; pointer-events:none; }
+  .stepper .count{
+    font-family:'Space Mono', monospace;
+    font-size:56px;
+    min-width:70px;
+    text-align:center;
+  }
+
+  /* Handoff pass screen */
+  .handoff-wrap{
+    flex:1;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    text-align:center;
+    gap:6px;
+  }
+  .player-num{
+    font-family:'Space Mono', monospace;
+    font-size:14px;
+    color:var(--muted);
+    letter-spacing:.2em;
+    text-transform:uppercase;
+  }
+  .player-name{
+    font-size: clamp(40px, 14vw, 68px);
+    font-weight:700;
+    text-transform:uppercase;
+    line-height:1;
+    margin: 4px 0 24px;
+  }
+  .hand-icon{ font-size:44px; opacity:.85; margin-bottom:8px; }
+
+  /* Redacted reveal card */
+  .reveal-box{
+    position:relative;
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding: 34px 20px;
+    text-align:center;
+    overflow:hidden;
+    cursor:pointer;
+    background: rgba(255,255,255,0.02);
+  }
+  .reveal-box .bar{
+    position:absolute; inset:0;
+    background: repeating-linear-gradient(135deg, #1a1f1a 0px, #1a1f1a 10px, #14180f 10px, #14180f 20px);
+    display:flex; align-items:center; justify-content:center;
+    font-family:'Space Mono', monospace;
+    letter-spacing:.2em;
+    color:#5a6a5a;
+    transition: transform .5s cubic-bezier(.7,0,.2,1), opacity .4s ease;
+    z-index:2;
+  }
+  .reveal-box.open .bar{
+    transform: translateX(105%);
+    opacity:0;
+  }
+  .reveal-inner{ position:relative; z-index:1; }
+  .role-label{
+    font-family:'Space Mono', monospace;
+    font-size:12px;
+    letter-spacing:.22em;
+    text-transform:uppercase;
+    color:var(--muted);
+    margin-bottom:10px;
+  }
+  .target-time{
+    font-family:'Space Mono', monospace;
+    font-weight:700;
+    font-size: clamp(52px, 16vw, 78px);
+    color:var(--green);
+    text-shadow: 0 0 24px rgba(77,255,156,.35);
+    letter-spacing:.02em;
+  }
+  .imposter-text{
+    font-size: clamp(30px, 9vw, 42px);
+    font-weight:700;
+    text-transform:uppercase;
+    color:var(--red);
+    text-shadow: 0 0 18px rgba(255,90,90,.3);
+    line-height:1.05;
+  }
+  .helper-note{
+    margin-top:14px;
+    font-size:14px;
+    color:var(--muted);
+    line-height:1.4;
+  }
+
+  /* Game round */
+  .round-wrap{
+    flex:1;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap: 30px;
+  }
+  .timer-display{
+    font-family:'Space Mono', monospace;
+    font-weight:700;
+    font-size: clamp(56px, 17vw, 84px);
+    color:var(--ink);
+    letter-spacing:.02em;
+  }
+  .timer-display.hidden-val{
+    color:#3a463c;
+    animation: blink 1.1s ease-in-out infinite;
+  }
+  @keyframes blink{ 0%,100%{opacity:1;} 50%{opacity:.35;} }
+  .timer-display.revealed{ color:var(--green); text-shadow:0 0 26px rgba(77,255,156,.35); }
+
+  .big-btn{
+    width: min(220px, 60vw);
+    height: min(220px, 60vw);
+    border-radius:50%;
+    border:3px solid var(--green);
+    background: radial-gradient(circle at 35% 30%, rgba(77,255,156,.18), transparent 70%);
+    color:var(--green);
+    font-family:'Barlow Condensed', sans-serif;
+    font-weight:700;
+    text-transform:uppercase;
+    letter-spacing:.06em;
+    font-size:22px;
+    cursor:pointer;
+    transition: transform .12s ease, box-shadow .2s ease;
+    box-shadow: 0 0 0 rgba(77,255,156,0);
+  }
+  .big-btn.running{
+    border-color:var(--red);
+    color:var(--red);
+    background: radial-gradient(circle at 35% 30%, rgba(255,90,90,.18), transparent 70%);
+    box-shadow: 0 0 40px rgba(255,90,90,.15);
+  }
+  .big-btn:active{ transform:scale(.95); }
+  .big-btn:focus-visible{ outline:2px solid var(--green); outline-offset:4px; }
+
+  .round-progress{
+    font-family:'Space Mono', monospace;
+    font-size:12px;
+    color:var(--muted);
+    letter-spacing:.18em;
+  }
+
+  /* Results */
+  .results-list{
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+    margin: 18px 0;
+  }
+  .result-row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:14px 16px;
+    background:rgba(255,255,255,0.02);
+  }
+  .result-row.imposter-row{
+    border-color:var(--red);
+    background:rgba(255,90,90,.06);
+  }
+  .result-row .rname{
+    font-weight:600;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+    font-size:17px;
+  }
+  .result-row .rtag{
+    font-family:'Space Mono', monospace;
+    font-size:10px;
+    color:var(--red);
+    letter-spacing:.15em;
+    display:block;
+    margin-top:2px;
+  }
+  .result-row .rtime{
+    font-family:'Space Mono', monospace;
+    font-size:22px;
+    font-weight:700;
+  }
+  .target-banner{
+    text-align:center;
+    padding: 16px;
+    border:1px dashed var(--green);
+    border-radius:8px;
+    margin-bottom:16px;
+  }
+  .target-banner .tval{
+    font-family:'Space Mono', monospace;
+    font-size:34px;
+    color:var(--green);
+    font-weight:700;
+  }
+
+  .footer-note{
+    text-align:center;
+    color:var(--muted);
+    font-size:13px;
+    margin-top:14px;
+    line-height:1.4;
+  }
+  .row-gap > * + *{ margin-top:12px; }
+
+  .corner-credit{
+    position:fixed;
+    bottom: max(10px, env(safe-area-inset-bottom));
+    left:14px;
+    font-family:'Space Mono', monospace;
+    font-size:13px;
+    letter-spacing:.12em;
+    text-transform:uppercase;
+    color:#5c6b5e;
+    z-index:5;
+    pointer-events:none;
+  }
+  .corner-version{
+    position:fixed;
+    bottom: max(10px, env(safe-area-inset-bottom));
+    right:14px;
+    font-family:'Space Mono', monospace;
+    font-size:13px;
+    letter-spacing:.12em;
+    color:#5c6b5e;
+    z-index:5;
+    pointer-events:none;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="corner-credit">made by kobi</div>
+<div class="corner-version" id="versionTag"></div>
+
+<script>
+/*
+  TIMER IMPOSTER — version log
+  v1 — initial build: setup, briefing/reveal, timed rounds, results
+  v2 — randomized turn order, "who goes first" reveal, credit + version footer
+  v3 — larger footer text for visibility
+  (bump GAME_VERSION below on every future update, and add a line here)
+*/
+const GAME_VERSION = "v3";
+(function(){
+  const state = {
+    screen: 'start',
+    numPlayers: 3,
+    imposterIndex: null,
+    targetMs: null,
+    revealIndex: 0,
+    revealPhase: 'handoff',
+    playerOrder: [],
+    roundIndex: 0,
+    roundPhase: 'handoff',
+    roundStart: null,
+    times: [],
+    resultsRevealed: false,
+  };
+
+  function vibrate(ms){ if(navigator.vibrate){ try{ navigator.vibrate(ms); }catch(e){} } }
+
+  function shuffledOrder(n){
+    const arr = Array.from({length:n}, (_,i)=>i);
+    for(let i=arr.length-1; i>0; i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [arr[i],arr[j]] = [arr[j],arr[i]];
+    }
+    return arr;
+  }
+
+  function pad2(n){ return n.toString().padStart(2,'0'); }
+  function formatTime(ms){
+    const totalCenti = Math.round(ms/10);
+    const sec = Math.min(99, Math.floor(totalCenti/100));
+    const centi = totalCenti % 100;
+    return pad2(sec) + ':' + pad2(centi);
+  }
+
+  function randomTargetMs(){
+    // between 1.00s and 9.00s, in 10ms steps -> mirrors "04:13" style display
+    const centi = Math.floor(Math.random() * (900 - 100 + 1)) + 100;
+    return centi * 10;
+  }
+
+  function resetGameState(keepPlayers){
+    state.imposterIndex = null;
+    state.targetMs = null;
+    state.revealIndex = 0;
+    state.revealPhase = 'handoff';
+    state.playerOrder = [];
+    state.roundIndex = 0;
+    state.roundPhase = 'handoff';
+    state.roundStart = null;
+    state.times = [];
+    state.resultsRevealed = false;
+    if(!keepPlayers) state.numPlayers = 3;
+  }
+
+  // ---- Actions ----
+  function goStart(){ state.screen='start'; render(); }
+  function goSetup(){ resetGameState(true); state.screen='setup'; render(); }
+  function changePlayers(d){
+    state.numPlayers = Math.max(3, Math.min(10, state.numPlayers + d));
+    render();
+  }
+  function beginReveal(){
+    state.imposterIndex = Math.floor(Math.random() * state.numPlayers);
+    state.targetMs = randomTargetMs();
+    state.revealIndex = 0;
+    state.revealPhase = 'handoff';
+    state.screen = 'reveal';
+    render();
+  }
+  function revealHandoffTap(){
+    state.revealPhase = 'card';
+    render();
+  }
+  function revealCardTap(){
+    vibrate(15);
+    state.revealPhase = 'shown';
+    render();
+  }
+  function revealNext(){
+    if(state.revealIndex < state.numPlayers - 1){
+      state.revealIndex++;
+      state.revealPhase = 'handoff';
+      render();
+    } else {
+      state.playerOrder = shuffledOrder(state.numPlayers);
+      state.screen = 'firstplayer';
+      render();
+    }
+  }
+  function goToGame(){
+    state.screen = 'game';
+    state.roundIndex = 0;
+    state.roundPhase = 'handoff';
+    render();
+  }
+  function roundHandoffTap(){
+    state.roundPhase = 'ready';
+    render();
+  }
+  function bigButtonTap(){
+    if(state.roundPhase === 'ready'){
+      vibrate(20);
+      state.roundStart = performance.now();
+      state.roundPhase = 'running';
+      render();
+    } else if(state.roundPhase === 'running'){
+      vibrate([20,30,20]);
+      const elapsed = performance.now() - state.roundStart;
+      const playerIdx = state.playerOrder[state.roundIndex];
+      state.times[playerIdx] = elapsed;
+      state.roundPhase = 'stopped';
+      render();
+    }
+  }
+  function nextPlayerTap(){
+    if(state.roundIndex < state.numPlayers - 1){
+      state.roundIndex++;
+      state.roundPhase = 'handoff';
+      render();
+    } else {
+      state.screen = 'results';
+      render();
+    }
+  }
+  function toggleReveal(){
+    state.resultsRevealed = !state.resultsRevealed;
+    render();
+  }
+  function playAgain(){
+    resetGameState(true);
+    state.screen = 'setup';
+    render();
+  }
+
+  // ---- Renderers ----
+  function renderStart(){
+    return `
+      <div class="screen" style="justify-content:center; align-items:flex-start;">
+        <div class="eyebrow">Classified Op // Pass &amp; Play</div>
+        <h1 class="title-main">TIMER<br>IMPOSTER</h1>
+        <p class="sub">One phone. Everyone but one player memorizes a secret target time.<br>Blind-tap a hidden stopwatch and try to hit it. Compare results. Find the imposter.</p>
+        <div class="spacer"></div>
+        <div class="row-gap" style="width:100%;">
+          <button class="btn solid" onclick="TI.goSetup()">Start</button>
+        </div>
+      </div>`;
+  }
+
+  function renderSetup(){
+    return `
+      <div class="screen">
+        <div class="eyebrow">Step 1 // Squad Size</div>
+        <h1 style="font-size:clamp(30px,8vw,38px); margin-top:10px;">How many players?</h1>
+        <p class="sub">Minimum 3. One will be the imposter.</p>
+        <div class="stepper">
+          <button ${state.numPlayers<=3?'disabled':''} onclick="TI.changePlayers(-1)">–</button>
+          <div class="count">${state.numPlayers}</div>
+          <button ${state.numPlayers>=10?'disabled':''} onclick="TI.changePlayers(1)">+</button>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn solid" onclick="TI.beginReveal()">Begin Briefing</button>
+      </div>`;
+  }
+
+  function renderReveal(){
+    const n = state.revealIndex + 1;
+    const isImposter = state.revealIndex === state.imposterIndex;
+
+    if(state.revealPhase === 'handoff'){
+      return `
+        <div class="screen">
+          <div class="handoff-wrap">
+            <div class="hand-icon">👆</div>
+            <div class="player-num">Hand the phone to</div>
+            <div class="player-name">Player ${n}</div>
+            <button class="btn solid" style="max-width:280px;" onclick="TI.revealHandoffTap()">I'm Player ${n} — Continue</button>
+          </div>
+        </div>`;
+    }
+
+    if(state.revealPhase === 'card'){
+      return `
+        <div class="screen">
+          <div class="handoff-wrap">
+            <div class="eyebrow">Player ${n} // Eyes Only</div>
+            <div class="reveal-box" onclick="TI.revealCardTap()">
+              <div class="bar">TAP TO DECLASSIFY</div>
+              <div class="reveal-inner">
+                ${isImposter
+                  ? `<div class="role-label">Role</div><div class="imposter-text">You are<br>the Imposter</div>`
+                  : `<div class="role-label">Target Time</div><div class="target-time">${formatTime(state.targetMs)}</div>`
+                }
+              </div>
+            </div>
+            <p class="helper-note">Make sure no one else can see the screen before you tap.</p>
+          </div>
+        </div>`;
+    }
+
+    // shown
+    const isLast = state.revealIndex === state.numPlayers - 1;
+    return `
+      <div class="screen">
+        <div class="handoff-wrap">
+          <div class="eyebrow">Player ${n} // Eyes Only</div>
+          <div class="reveal-box open">
+            <div class="bar">TAP TO DECLASSIFY</div>
+            <div class="reveal-inner">
+              ${isImposter
+                ? `<div class="role-label">Role</div><div class="imposter-text">You are<br>the Imposter</div><p class="helper-note">You won't see the target time. When it's your turn, guess as best you can — don't get caught.</p>`
+                : `<div class="role-label">Target Time</div><div class="target-time">${formatTime(state.targetMs)}</div><p class="helper-note">Memorize it. When it's your turn, you'll start and stop a hidden stopwatch — try to land exactly here.</p>`
+              }
+            </div>
+          </div>
+          <div style="width:100%; margin-top:22px;">
+            <button class="btn solid" onclick="TI.revealNext()">${isLast ? 'Everyone Ready — Start Game' : 'Next Player'}</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function renderFirstPlayer(){
+    const first = state.playerOrder[0] + 1;
+    return `
+      <div class="screen">
+        <div class="handoff-wrap">
+          <div class="eyebrow">Round Order Locked</div>
+          <div class="hand-icon">🎲</div>
+          <div class="player-num">Going first</div>
+          <div class="player-name">Player ${first}</div>
+          <p class="helper-note">Turn order is randomized — everyone plays exactly once.</p>
+          <button class="btn solid" style="max-width:280px; margin-top:14px;" onclick="TI.goToGame()">Start Round 1</button>
+        </div>
+      </div>`;
+  }
+
+  function renderGame(){
+    const playerIdx = state.playerOrder[state.roundIndex];
+    const n = playerIdx + 1;
+    const roundNum = state.roundIndex + 1;
+
+    if(state.roundPhase === 'handoff'){
+      return `
+        <div class="screen">
+          <div class="handoff-wrap">
+            <div class="round-progress">ROUND ${roundNum} OF ${state.numPlayers}</div>
+            <div class="hand-icon">👆</div>
+            <div class="player-num">Hand the phone to</div>
+            <div class="player-name">Player ${n}</div>
+            <button class="btn solid" style="max-width:280px;" onclick="TI.roundHandoffTap()">I'm Player ${n} — Continue</button>
+          </div>
+        </div>`;
+    }
+
+    let timerHtml, btnLabel, btnClass = '';
+    if(state.roundPhase === 'ready'){
+      timerHtml = `<div class="timer-display hidden-val">--:--</div>`;
+      btnLabel = 'TAP TO START';
+    } else if(state.roundPhase === 'running'){
+      timerHtml = `<div class="timer-display hidden-val">••:••</div>`;
+      btnLabel = 'TAP TO STOP';
+      btnClass = 'running';
+    } else {
+      timerHtml = `<div class="timer-display revealed">${formatTime(state.times[playerIdx])}</div>`;
+      btnLabel = 'STOPPED';
+    }
+
+    const showNext = state.roundPhase === 'stopped';
+    const isLast = state.roundIndex === state.numPlayers - 1;
+
+    return `
+      <div class="screen">
+        <div class="round-wrap">
+          <div class="round-progress">ROUND ${roundNum} OF ${state.numPlayers} — PLAYER ${n}</div>
+          ${timerHtml}
+          <button class="big-btn ${btnClass}" ${state.roundPhase==='stopped'?'disabled':''} onclick="TI.bigButtonTap()">${btnLabel}</button>
+          ${showNext ? `<button class="btn solid" style="max-width:280px;" onclick="TI.nextPlayerTap()">${isLast ? 'Finish — See Results' : 'Next Player'}</button>` : `<p class="helper-note">Tap once to start, tap again to stop. You won't see the clock while it runs.</p>`}
+        </div>
+      </div>`;
+  }
+
+  function renderResults(){
+    let rows = '';
+    for(let i=0; i<state.numPlayers; i++){
+      const isImp = state.resultsRevealed && i === state.imposterIndex;
+      rows += `
+        <div class="result-row ${isImp?'imposter-row':''}">
+          <div>
+            <div class="rname">Player ${i+1}</div>
+            ${isImp ? `<span class="rtag">IMPOSTER</span>` : ''}
+          </div>
+          <div class="rtime">${formatTime(state.times[i])}</div>
+        </div>`;
+    }
+
+    return `
+      <div class="screen">
+        <div class="eyebrow">Debrief</div>
+        <h1 style="font-size:clamp(28px,7vw,34px); margin-top:8px;">Results</h1>
+        ${state.resultsRevealed ? `
+          <div class="target-banner">
+            <div class="role-label">Target Time Was</div>
+            <div class="tval">${formatTime(state.targetMs)}</div>
+          </div>
+        ` : `<p class="sub">Discuss and guess who never saw the target — then reveal.</p>`}
+        <div class="results-list">${rows}</div>
+        <div class="spacer"></div>
+        <div class="row-gap">
+          ${!state.resultsRevealed ? `<button class="btn danger" onclick="TI.toggleReveal()">Reveal Imposter</button>` : ''}
+          <button class="btn solid" onclick="TI.playAgain()">Play Again</button>
+          <button class="btn ghost" onclick="TI.goStart()">Back to Start</button>
+        </div>
+      </div>`;
+  }
+
+  function render(){
+    const app = document.getElementById('app');
+    let html = '';
+    switch(state.screen){
+      case 'start': html = renderStart(); break;
+      case 'setup': html = renderSetup(); break;
+      case 'reveal': html = renderReveal(); break;
+      case 'firstplayer': html = renderFirstPlayer(); break;
+      case 'game': html = renderGame(); break;
+      case 'results': html = renderResults(); break;
+    }
+    app.innerHTML = html;
+  }
+
+  window.TI = {
+    goStart, goSetup, changePlayers, beginReveal,
+    revealHandoffTap, revealCardTap, revealNext,
+    goToGame, roundHandoffTap, bigButtonTap, nextPlayerTap,
+    toggleReveal, playAgain
+  };
+
+  document.getElementById('versionTag').textContent = GAME_VERSION;
+  render();
+})();
+</script>
+</body>
+</html>
