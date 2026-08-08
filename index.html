@@ -347,30 +347,6 @@
     letter-spacing:.18em;
   }
 
-  /* Voting Screen */
-  .vote-grid{
-    display:grid;
-    grid-template-columns: 1fr 1fr;
-    gap:10px;
-    margin: 16px 0;
-  }
-  .vote-card{
-    border:1px solid var(--line);
-    border-radius:8px;
-    padding:14px;
-    text-align:center;
-    background:rgba(255,255,255,0.02);
-    cursor:pointer;
-    font-weight:700;
-    font-size:18px;
-    text-transform:uppercase;
-  }
-  .vote-card.selected{
-    border-color:var(--red);
-    background:rgba(255,90,90,0.15);
-    color:var(--red);
-  }
-
   /* Results */
   .scoreboard{
     display:flex;
@@ -507,8 +483,9 @@
   v1-v3 — core gameplay, pass-and-play, versioning
   v4 — added help modal
   v5 — added custom modes, player names, clues, voting, audio SFX, multi-round scores
+  v6 — removed voting screen, direct flow to results
 */
-const GAME_VERSION = "v5";
+const GAME_VERSION = "v6";
 (function(){
   const state = {
     screen: 'start',
@@ -528,7 +505,6 @@ const GAME_VERSION = "v5";
     roundPhase: 'handoff',
     roundStart: null,
     times: [],
-    votedImposter: null,
     resultsRevealed: false,
     matchRound: 1,
     scores: {} // { playerName: points }
@@ -628,7 +604,6 @@ const GAME_VERSION = "v5";
     state.roundPhase = 'handoff';
     state.roundStart = null;
     state.times = [];
-    state.votedImposter = null;
     state.resultsRevealed = false;
     state.showHelp = false;
     if(!keepPlayers){
@@ -722,35 +697,33 @@ const GAME_VERSION = "v5";
       state.roundPhase = 'handoff';
       render();
     } else {
-      state.screen = 'vote';
+      state.screen = 'results';
       render();
     }
-  }
-  function selectVote(pIdx){
-    playSFX('click');
-    state.votedImposter = pIdx;
-    render();
-  }
-  function submitVote(){
-    playSFX('reveal');
-    state.screen = 'results';
-    render();
   }
   function toggleReveal(){
     playSFX('reveal');
     state.resultsRevealed = true;
 
-    // Award Points
-    if(state.votedImposter === state.imposterIndex){
-      // Crew caught imposter
-      state.playerNames.forEach((n, i) => {
-        if(i !== state.imposterIndex) state.scores[n] = (state.scores[n] || 0) + 1;
-      });
-    } else {
-      // Imposter escaped
-      const impName = state.playerNames[state.imposterIndex];
-      state.scores[impName] = (state.scores[impName] || 0) + 2;
+    // Calculate closest player to target among regular players
+    let bestDiff = Infinity;
+    let winnerIdx = null;
+
+    state.playerNames.forEach((_, i) => {
+      if(i !== state.imposterIndex && state.times[i] !== undefined){
+        const diff = Math.abs(state.times[i] - state.targetMs);
+        if(diff < bestDiff){
+          bestDiff = diff;
+          winnerIdx = i;
+        }
+      }
+    });
+
+    if(winnerIdx !== null){
+      const winName = state.playerNames[winnerIdx];
+      state.scores[winName] = (state.scores[winName] || 0) + 1;
     }
+
     render();
   }
   function nextRound(){
@@ -786,7 +759,7 @@ const GAME_VERSION = "v5";
           
           <div class="help-step">
             <div class="help-num">4</div>
-            <div class="help-body"><strong>Vote &amp; Score:</strong> Debate, vote on who the Imposter is, and gain score points across rounds!</div>
+            <div class="help-body"><strong>Debrief &amp; Score:</strong> Check the recorded times, reveal the Imposter, and track your scores!</div>
           </div>
 
           <button class="btn solid" style="margin-top:20px;" onclick="TI.toggleHelp(false)">Got It</button>
@@ -799,7 +772,7 @@ const GAME_VERSION = "v5";
       <div class="screen" style="justify-content:center; align-items:flex-start;">
         <div class="eyebrow">Classified Op // Pass &amp; Play</div>
         <h1 class="title-main">TIMER<br>IMPOSTER</h1>
-        <p class="sub">One phone. Everyone but one player memorizes a secret target time.<br>Blind-tap a hidden stopwatch, vote out the imposter, and score points!</p>
+        <p class="sub">One phone. Everyone but one player memorizes a secret target time.<br>Blind-tap a hidden stopwatch and catch the imposter!</p>
         <div class="spacer"></div>
         <div class="row-gap" style="width:100%;">
           <button class="btn solid" onclick="TI.goSetup()">Start Game</button>
@@ -963,28 +936,8 @@ const GAME_VERSION = "v5";
           <div class="round-progress">TURN ${roundNum} OF ${state.numPlayers} — ${pName}</div>
           ${timerHtml}
           <button class="big-btn ${btnClass}" ${state.roundPhase==='stopped'?'disabled':''} onclick="TI.bigButtonTap()">${btnLabel}</button>
-          ${showNext ? `<button class="btn solid" style="max-width:280px;" onclick="TI.nextPlayerTap()">${isLast ? 'Finish — Proceed to Vote' : 'Next Player'}</button>` : `<p class="helper-note">Tap once to start, tap again to stop. The clock is hidden while running.</p>`}
+          ${showNext ? `<button class="btn solid" style="max-width:280px;" onclick="TI.nextPlayerTap()">${isLast ? 'View Results' : 'Next Player'}</button>` : `<p class="helper-note">Tap once to start, tap again to stop. The clock is hidden while running.</p>`}
         </div>
-      </div>`;
-  }
-
-  function renderVote(){
-    const voteCards = state.playerNames.map((n, i) => `
-      <div class="vote-card ${state.votedImposter===i?'selected':''}" onclick="TI.selectVote(${i})">
-        ${n}
-      </div>
-    `).join('');
-
-    return `
-      <div class="screen">
-        <div class="eyebrow">Interrogation Phase</div>
-        <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Cast Squad Vote</h1>
-        <p class="sub">Discuss the timings below, accuse suspects, and vote who you think is the Imposter!</p>
-        
-        <div class="vote-grid">${voteCards}</div>
-        
-        <div class="spacer"></div>
-        <button class="btn solid" ${state.votedImposter===null?'disabled':''} onclick="TI.submitVote()">Lock In Vote</button>
       </div>`;
   }
 
@@ -992,10 +945,10 @@ const GAME_VERSION = "v5";
     let rows = '';
     for(let i=0; i<state.numPlayers; i++){
       const isImp = state.resultsRevealed && i === state.imposterIndex;
-      const isVoted = state.votedImposter === i;      rows += `
+      rows += `
         <div class="result-row ${isImp?'imposter-row':''}">
           <div>
-            <div class="rname">${state.playerNames[i]} ${isVoted ? '📌 (Voted)' : ''}</div>
+            <div class="rname">${state.playerNames[i]}</div>
             ${isImp ? `<span class="rtag">IMPOSTER</span>` : ''}
           </div>
           <div class="rtime">${formatTime(state.times[i])}</div>
@@ -1021,7 +974,7 @@ const GAME_VERSION = "v5";
             <div class="role-label">Target Time Was</div>
             <div class="tval">${formatTime(state.targetMs)}</div>
           </div>
-        ` : `<p class="sub">Voted for: <strong>${state.playerNames[state.votedImposter]}</strong>. Tap reveal to check!</p>`}
+        ` : `<p class="sub">Review the recorded times with everyone and uncover who was guessing blind!</p>`}
 
         <div class="results-list">${rows}</div>
         <div class="spacer"></div>
@@ -1042,7 +995,6 @@ const GAME_VERSION = "v5";
       case 'reveal': html = renderReveal(); break;
       case 'firstplayer': html = renderFirstPlayer(); break;
       case 'game': html = renderGame(); break;
-      case 'vote': html = renderVote(); break;
       case 'results': html = renderResults(); break;
     }
     app.innerHTML = html;
@@ -1052,7 +1004,7 @@ const GAME_VERSION = "v5";
     goStart, toggleHelp, toggleAudio, goSetup, changePlayers, updateName, setMode, toggleClues,
     beginReveal, revealHandoffTap, revealCardTap, revealNext,
     goToGame, roundHandoffTap, bigButtonTap, nextPlayerTap,
-    selectVote, submitVote, toggleReveal, nextRound
+    toggleReveal, nextRound
   };
 
   document.getElementById('versionTag').textContent = GAME_VERSION;
