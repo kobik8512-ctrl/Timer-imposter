@@ -1,0 +1,8 @@
+[{
+      "relation": ["delegate_permission/common.handle_all_urls"],
+      "target": {
+        "namespace": "android_app",
+        "package_name": "io.github.kobik8512_ctrl.twa",
+        "sha256_cert_fingerprints": ["EF:58:6C:95:A4:1B:64:9A:44:CB:21:FC:1D:92:54:25:FD:40:B1:7C:36:3E:F7:1D:51:6C:38:50:C3:A1:ED:D7"]
+      }
+    }]
