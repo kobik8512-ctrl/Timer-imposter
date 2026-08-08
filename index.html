@@ -4,6 +4,10 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
 <title>TIMER IMPOSTER</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0a0d0b">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -484,8 +488,9 @@
   v4 — added help modal
   v5 — added custom modes, player names, clues, voting, audio SFX, multi-round scores
   v6 — removed voting screen, direct flow to results
+  v7 — restored PWA manifest/icon links in <head> (needed for GitHub Pages / APK install to keep working)
 */
-const GAME_VERSION = "v6";
+const GAME_VERSION = "v7";
 (function(){
   const state = {
     screen: 'start',
