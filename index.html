@@ -357,57 +357,6 @@
     font-weight:700;
   }
 
-  /* Help Overlay Modal */
-  .modal-overlay{
-    position:fixed;
-    inset:0;
-    background:rgba(10, 13, 11, 0.92);
-    backdrop-filter: blur(6px);
-    -webkit-backdrop-filter: blur(6px);
-    z-index:10;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    padding:20px;
-    animation: fadein .25s ease both;
-  }
-  .modal-card{
-    background: var(--panel-solid);
-    border:1px solid var(--line);
-    border-radius:12px;
-    padding:24px;
-    width:100%;
-    max-width:460px;
-    max-height:85vh;
-    overflow-y:auto;
-    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-  }
-  .modal-title{
-    font-size:28px;
-    margin-top:6px;
-    margin-bottom:16px;
-  }
-  .help-step{
-    display:flex;
-    gap:14px;
-    margin-bottom:16px;
-  }
-  .help-step:last-of-type{ margin-bottom:0; }
-  .help-num{
-    font-family:'Space Mono', monospace;
-    font-size:14px;
-    font-weight:700;
-    color:var(--green);
-    background:rgba(77,255,156,0.1);
-    border:1px solid var(--green-dim);
-    width:28px; height:28px;
-    border-radius:50%;
-    display:flex; align-items:center; justify-content:center;
-    flex:none;
-  }
-  .help-body{ font-size:15px; color:var(--ink); line-height:1.45; }
-  .help-body strong{ color:var(--green); }
-
   .footer-note{
     text-align:center;
     color:var(--muted);
@@ -453,14 +402,12 @@
   v1 — initial build: setup, briefing/reveal, timed rounds, results
   v2 — randomized turn order, "who goes first" reveal, credit + version footer
   v3 — larger footer text for visibility
-  v4 — added How To Play button and help modal
   (bump GAME_VERSION below on every future update, and add a line here)
 */
-const GAME_VERSION = "v4";
+const GAME_VERSION = "v3";
 (function(){
   const state = {
     screen: 'start',
-    showHelp: false,
     numPlayers: 3,
     imposterIndex: null,
     targetMs: null,
@@ -510,13 +457,11 @@ const GAME_VERSION = "v4";
     state.roundStart = null;
     state.times = [];
     state.resultsRevealed = false;
-    state.showHelp = false;
     if(!keepPlayers) state.numPlayers = 3;
   }
 
   // ---- Actions ----
   function goStart(){ state.screen='start'; render(); }
-  function toggleHelp(show){ state.showHelp = show; render(); }
   function goSetup(){ resetGameState(true); state.screen='setup'; render(); }
   function changePlayers(d){
     state.numPlayers = Math.max(3, Math.min(10, state.numPlayers + d));
@@ -596,39 +541,6 @@ const GAME_VERSION = "v4";
   }
 
   // ---- Renderers ----
-  function renderHelpModal(){
-    if(!state.showHelp) return '';
-    return `
-      <div class="modal-overlay" onclick="TI.toggleHelp(false)">
-        <div class="modal-card" onclick="event.stopPropagation()">
-          <div class="eyebrow">Briefing // Manual</div>
-          <h2 class="modal-title">HOW TO PLAY</h2>
-          
-          <div class="help-step">
-            <div class="help-num">1</div>
-            <div class="help-body"><strong>Pass the phone around:</strong> Each player secretly checks their role.</div>
-          </div>
-          
-          <div class="help-step">
-            <div class="help-num">2</div>
-            <div class="help-body"><strong>The Secret Target:</strong> Regular players see a target time (e.g. <code>04:15</code>). The <strong>Imposter</strong> sees nothing.</div>
-          </div>
-          
-          <div class="help-step">
-            <div class="help-num">3</div>
-            <div class="help-body"><strong>Blind Stopwatch:</strong> Take turns tapping to start and stop the hidden clock. Try to land as close to the target as possible. Imposters must fake it!</div>
-          </div>
-          
-          <div class="help-step">
-            <div class="help-num">4</div>
-            <div class="help-body"><strong>Debrief:</strong> Compare final times. Interrogate each other, spot the anomaly, and vote on who the Imposter is before revealing!</div>
-          </div>
-
-          <button class="btn solid" style="margin-top:20px;" onclick="TI.toggleHelp(false)">Got It</button>
-        </div>
-      </div>`;
-  }
-
   function renderStart(){
     return `
       <div class="screen" style="justify-content:center; align-items:flex-start;">
@@ -638,10 +550,8 @@ const GAME_VERSION = "v4";
         <div class="spacer"></div>
         <div class="row-gap" style="width:100%;">
           <button class="btn solid" onclick="TI.goSetup()">Start</button>
-          <button class="btn ghost" onclick="TI.toggleHelp(true)">How to Play</button>
         </div>
-      </div>
-      ${renderHelpModal()}`;
+      </div>`;
   }
 
   function renderSetup(){
@@ -826,7 +736,7 @@ const GAME_VERSION = "v4";
   }
 
   window.TI = {
-    goStart, toggleHelp, goSetup, changePlayers, beginReveal,
+    goStart, goSetup, changePlayers, beginReveal,
     revealHandoffTap, revealCardTap, revealNext,
     goToGame, roundHandoffTap, bigButtonTap, nextPlayerTap,
     toggleReveal, playAgain
