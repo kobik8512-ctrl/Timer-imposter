@@ -473,6 +473,54 @@
     font-family:'Space Mono', monospace; font-size:12px; letter-spacing:.12em;
     color:#5c6b5e; z-index:5; pointer-events:none;
   }
+
+  .paywall-overlay{
+    position:fixed; inset:0;
+    background:rgba(10, 13, 11, 0.97);
+    backdrop-filter: blur(8px);
+    z-index:50;
+    display:flex; align-items:center; justify-content:center;
+    padding:24px;
+    animation: fadein .3s ease both;
+  }
+  .paywall-card{
+    background: var(--panel-solid);
+    border:2px solid var(--red);
+    border-radius:12px;
+    padding:28px 24px;
+    width:100%; max-width:420px;
+    text-align:center;
+  }
+  .paywall-icon{ font-size:44px; margin-bottom:8px; }
+  .paywall-title{
+    font-size: clamp(24px, 7vw, 30px);
+    font-weight:700;
+    text-transform:uppercase;
+    color:var(--red);
+    margin: 8px 0;
+    line-height:1.1;
+  }
+  .paywall-body{
+    color:var(--muted);
+    font-size:15px;
+    line-height:1.5;
+    margin: 12px 0 20px;
+  }
+  .paywall-price{
+    font-family:'Space Mono', monospace;
+    font-size:40px;
+    font-weight:700;
+    color:var(--amber);
+    margin: 10px 0;
+  }
+  .paywall-gotcha{
+    display:none;
+  }
+  .paywall-gotcha.show{
+    display:block;
+    animation: fadein .3s ease both;
+  }
+  .paywall-gotcha .paywall-title{ color:var(--green); }
 </style>
 </head>
 <body>
@@ -480,6 +528,7 @@
 <button class="audio-btn active" id="audioToggle" onclick="TI.toggleAudio()">🔊</button>
 <div class="corner-credit">made by kobi</div>
 <div class="corner-version" id="versionTag"></div>
+<div id="paywallRoot"></div>
 
 <script>
 /*
@@ -489,8 +538,10 @@
   v5 — added custom modes, player names, clues, voting, audio SFX, multi-round scores
   v6 — removed voting screen, direct flow to results
   v7 — restored PWA manifest/icon links in <head> (needed for GitHub Pages / APK install to keep working)
+  v8 — added joke "offline paywall" prank screen (not a real charge, just a gag)
+  v9 — swapped ₾ for $ in the paywall joke
 */
-const GAME_VERSION = "v7";
+const GAME_VERSION = "v9";
 (function(){
   const state = {
     screen: 'start',
@@ -1014,7 +1065,52 @@ const GAME_VERSION = "v7";
 
   document.getElementById('versionTag').textContent = GAME_VERSION;
   render();
+
+  // ---- Joke "offline paywall" prank ----
+  // Not a real charge — the game already works fully offline.
+  // This just scares the player for a second before letting them in.
+  function showPaywallJoke(){
+    const root = document.getElementById('paywallRoot');
+    root.innerHTML = `
+      <div class="paywall-overlay" id="paywallOverlay">
+        <div class="paywall-card">
+          <div id="paywallStep1">
+            <div class="paywall-icon">🚫📶</div>
+            <div class="paywall-title">No WiFi Detected</div>
+            <div class="paywall-body">Timer Imposter requires an active internet connection to play.<br>Offline Mode is a premium feature.</div>
+            <div class="paywall-price">$1.00</div>
+            <button class="btn danger" onclick="TI.paySubmit()">Pay $1 to Unlock Offline Mode</button>
+          </div>
+          <div class="paywall-gotcha" id="paywallStep2">
+            <div class="paywall-icon">😂</div>
+            <div class="paywall-title">Relax, it's free!</div>
+            <div class="paywall-body">Got you. This game works fully offline, no payment, no ads, ever.<br>Enjoy — and go outside sometime.</div>
+            <button class="btn solid" onclick="TI.closePaywallJoke()">Continue to Game</button>
+          </div>
+        </div>
+      </div>`;
+  }
+  function paySubmit(){
+    playSFX('reveal');
+    vibrate([30,40,30,40,30]);
+    document.getElementById('paywallStep1').style.display = 'none';
+    document.getElementById('paywallStep2').classList.add('show');
+  }
+  function closePaywallJoke(){
+    playSFX('click');
+    const root = document.getElementById('paywallRoot');
+    root.innerHTML = '';
+  }
+
+  if(navigator.onLine === false){
+    showPaywallJoke();
+  }
+  window.addEventListener('offline', showPaywallJoke);
+
+  window.TI.paySubmit = paySubmit;
+  window.TI.closePaywallJoke = closePaywallJoke;
 })();
+
 </script>
 </body>
 </html>
