@@ -392,6 +392,10 @@
     border-color:var(--red);
     background:rgba(255,90,90,.06);
   }
+  .result-row.crew-row{
+    border-color:var(--green);
+    background:rgba(77,255,156,.06);
+  }
   .result-row .rname{
     font-weight:600;
     text-transform:uppercase;
@@ -423,6 +427,19 @@
     color:var(--green);
     font-weight:700;
   }
+  .winner-banner{
+    text-align:center;
+    padding: 14px;
+    border-radius:8px;
+    margin-bottom:12px;
+    font-family:'Barlow Condensed', sans-serif;
+    text-transform: uppercase;
+    font-weight: 700;
+    font-size: 24px;
+    letter-spacing: .05em;
+  }
+  .winner-banner.imposter{ background:rgba(255,90,90,.15); color:var(--red); border:2px solid var(--red); }
+  .winner-banner.crew{ background:rgba(77,255,156,.15); color:var(--green); border:2px solid var(--green); }
 
   .modal-overlay{
     position:fixed; inset:0;
@@ -489,7 +506,7 @@
 <div class="corner-version" id="versionTag"></div>
 
 <script>
-const GAME_VERSION = "v15";
+const GAME_VERSION = "v16";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -520,6 +537,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     onlineImposterUid: null,
     onlineTargetMs: null,
     onlineRoundPhase: 'ready',
+    onlineMaxPlayers: 5,
+    onlineVotedFor: null,
+    onlineCrewWins: false,
+    onlineSuspectedUid: null,
     soundEnabled: true,
     numPlayers: 3,
     playerNames: ['Player 1', 'Player 2', 'Player 3'],
@@ -883,6 +904,15 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     if(!fbReady || !state.currentUser) return;
     playSFX('click');
     
+    let maxP = prompt('Enter Max Players (3-10):', '5');
+    if(!maxP) return;
+    let parsedMax = parseInt(maxP, 10);
+    if(isNaN(parsedMax) || parsedMax < 3 || parsedMax > 10){
+        alert('Max players must be a number between 3 and 10.');
+        return;
+    }
+    state.onlineMaxPlayers = parsedMax;
+
     let roomName = 'Public Room';
     let password = '';
 
@@ -904,13 +934,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       isPrivate: isPrivate,
       password: password || null,
       status: 'waiting',
+      maxPlayers: state.onlineMaxPlayers,
       mode: state.mode || 'standard',
       multiplier: state.multiplier || 1,
       enableClues: state.enableClues !== false,
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     }).then(() => {
       return fbDb.collection('rooms').doc(code).collection('players').doc(state.currentUser.uid).set({
-        name: state.currentUser.name, joined: firebase.firestore.FieldValue.serverTimestamp()
+        name: state.currentUser.name, joined: firebase.firestore.FieldValue.serverTimestamp(), votedFor: null
       });
     }).then(() => {
       state.screen = 'onlineLobby';
@@ -953,14 +984,23 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     roomRef.get().then(doc => {
       if(!doc.exists){ alert('No room found.'); return; }
       if(doc.data().status !== 'waiting'){ alert('That room has already started.'); return; }
-      state.roomCode = code;
-      state.isHost = false;
-      return roomRef.collection('players').doc(state.currentUser.uid).set({
-        name: state.currentUser.name, joined: firebase.firestore.FieldValue.serverTimestamp()
-      }).then(() => {
-        state.screen = 'onlineLobby';
-        subscribeToRoom(code);
-        render();
+      
+      // Check Max Players
+      return roomRef.collection('players').get().then(snap => {
+          if(snap.size >= (doc.data().maxPlayers || 10)){
+              alert('This room is full!');
+              return;
+          }
+          state.roomCode = code;
+          state.isHost = false;
+          state.onlineMaxPlayers = doc.data().maxPlayers || 10;
+          return roomRef.collection('players').doc(state.currentUser.uid).set({
+            name: state.currentUser.name, joined: firebase.firestore.FieldValue.serverTimestamp(), votedFor: null
+          }).then(() => {
+            state.screen = 'onlineLobby';
+            subscribeToRoom(code);
+            render();
+          });
       });
     }).catch(err => alert('Could not join room: ' + err.message));
   }
@@ -975,6 +1015,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.onlineStatus = data.status;
       state.onlineImposterUid = data.imposterUid || null;
       state.onlineTargetMs = data.targetMs || null;
+      state.onlineMaxPlayers = data.maxPlayers || 10;
+      state.onlineSuspectedUid = data.suspectedUid || null;
+      state.onlineCrewWins = data.crewWins || false;
+
       if(data.multiplier) state.multiplier = data.multiplier;
 
       if(data.status === 'reveal' && !state.onlineSecret){
@@ -982,10 +1026,15 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           if(sdoc.exists){ state.onlineSecret = sdoc.data(); render(); }
         });
       }
+      
       if(state.screen === 'onlineLobby' && data.status === 'reveal'){
         state.screen = 'onlineReveal';
       }
-      if((state.screen === 'onlineReveal' || state.screen === 'onlineWaiting') && data.status === 'revealed'){
+      if(data.status === 'voting' && state.screen !== 'onlineVoting' && state.screen !== 'onlineResults'){
+        state.screen = 'onlineVoting';
+        state.onlineVotedFor = null;
+      }
+      if((state.screen === 'onlineVoting' || state.screen === 'onlineWaiting') && data.status === 'revealed'){
         state.screen = 'onlineResults';
       }
       render();
@@ -994,6 +1043,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.onlinePlayersUnsub = roomRef.collection('players').onSnapshot(snap => {
       state.onlinePlayers = [];
       snap.forEach(d => state.onlinePlayers.push({ uid: d.id, ...d.data() }));
+      
+      // Auto tally votes for host
+      if(state.isHost && state.onlineStatus === 'voting'){
+          const allVoted = state.onlinePlayers.every(p => p.votedFor);
+          if(allVoted) tallyOnlineVotes();
+      }
       render();
     });
   }
@@ -1017,6 +1072,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.onlineImposterUid = null;
     state.onlineTargetMs = null;
     state.onlineRoundPhase = 'ready';
+    state.onlineVotedFor = null;
   }
 
   function exitOnlineToMenu(){
@@ -1054,7 +1110,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           ? { isImposter: true, clue: enableClues ? clue : null }
           : { isImposter: false, targetMs: targetMs }
         );
-        batch.update(roomRef.collection('players').doc(p.uid), { time: null, submitted: false });
+        batch.update(roomRef.collection('players').doc(p.uid), { time: null, submitted: false, votedFor: null });
       });
       batch.update(roomRef, { status: 'reveal' });
       roomRef.set({ _imposterUidPending: imposterUid, _targetMsPending: targetMs }, { merge: true });
@@ -1093,16 +1149,47 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     render();
   }
 
-  function revealOnlineResults(){
+  function startOnlineVoting(){
     if(!state.isHost) return;
-    playSFX('reveal');
+    playSFX('click');
+    fbDb.collection('rooms').doc(state.roomCode).update({ status: 'voting' });
+  }
+
+  function castOnlineVote(targetUid){
+    playSFX('click');
+    state.onlineVotedFor = targetUid;
+    fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(state.currentUser.uid).update({ votedFor: targetUid });
+    render();
+  }
+
+  function tallyOnlineVotes(){
     const roomRef = fbDb.collection('rooms').doc(state.roomCode);
     roomRef.get().then(doc => {
       const data = doc.data();
-      return roomRef.update({
+      const imposterUid = data._imposterUidPending;
+      
+      let voteCounts = {};
+      state.onlinePlayers.forEach(p => {
+        if(p.votedFor) {
+           voteCounts[p.votedFor] = (voteCounts[p.votedFor] || 0) + 1;
+        }
+      });
+      
+      let mostVotes = 0;
+      let suspectedUid = null;
+      for(const [uid, count] of Object.entries(voteCounts)){
+        if(count > mostVotes){ mostVotes = count; suspectedUid = uid; }
+      }
+      
+      const crewWins = suspectedUid === imposterUid;
+      
+      // Update room to revealed status and declare winner
+      roomRef.update({
         status: 'revealed',
-        imposterUid: data._imposterUidPending,
-        targetMs: data._targetMsPending
+        imposterUid: imposterUid,
+        targetMs: data._targetMsPending,
+        suspectedUid: suspectedUid,
+        crewWins: crewWins
       });
     });
   }
@@ -1112,8 +1199,21 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     playSFX('click');
     state.onlineSecret = null;
     state.onlineRoundPhase = 'ready';
+    state.onlineVotedFor = null;
     const roomRef = fbDb.collection('rooms').doc(state.roomCode);
-    roomRef.update({ status: 'waiting', imposterUid: firebase.firestore.FieldValue.delete(), targetMs: firebase.firestore.FieldValue.delete() });
+    roomRef.update({ 
+        status: 'waiting', 
+        imposterUid: firebase.firestore.FieldValue.delete(), 
+        targetMs: firebase.firestore.FieldValue.delete(),
+        suspectedUid: firebase.firestore.FieldValue.delete(),
+        crewWins: firebase.firestore.FieldValue.delete()
+    });
+    
+    // Clear player votes
+    state.onlinePlayers.forEach(p => {
+        roomRef.collection('players').doc(p.uid).update({ votedFor: null, submitted: false, time: null });
+    });
+    
     state.screen = 'onlineLobby';
     render();
   }
@@ -1129,7 +1229,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
           <div class="help-step">
             <div class="help-num">1</div>
-            <div class="help-body"><strong>Set up the game.</strong> Choose squad size, game mode, and point multiplier (1x, 2x, or 3x).</div>
+            <div class="help-body"><strong>Set up the game.</strong> Choose squad size, game mode, and point multiplier.</div>
           </div>
 
           <div class="help-step">
@@ -1144,7 +1244,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
           <div class="help-step">
             <div class="help-num">4</div>
-            <div class="help-body"><strong>Reveal &amp; score.</strong> Reveal the imposter. The closest non-imposter player wins points scaled by the selected multiplier!</div>
+            <div class="help-body"><strong>Reveal &amp; Vote.</strong> Everyone votes on who the imposter is based on the times. If the majority votes right, the Crew wins!</div>
           </div>
 
           <button class="btn solid" style="margin-top:20px;" onclick="TI.toggleHelp(false)">Got It</button>
@@ -1426,7 +1526,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       <div class="result-row">
         <div>
           <div class="rname">${r.roomName || 'Public Room'}</div>
-          <span style="font-size:12px; color:var(--muted);">${r.mode.toUpperCase()} • ${r.multiplier || 1}x MULTIPLIER</span>
+          <span style="font-size:12px; color:var(--muted);">${r.mode.toUpperCase()} • Max: ${r.maxPlayers || 10}</span>
         </div>
         <button class="chip-btn active" style="flex:none; padding:6px 12px;" onclick="TI.joinPublicRoom('${r.code}')">Join</button>
       </div>
@@ -1474,7 +1574,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     `).join('');
     return `
       <div class="screen">
-        <div class="eyebrow">Room Lobby // ${state.multiplier}x Multiplier</div>
+        <div class="eyebrow">Room Lobby // Max: ${state.onlineMaxPlayers} Players</div>
         <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Code: ${state.roomCode}</h1>
         <p class="sub">Waiting for players to join. Need at least 3 players.</p>
         <div class="results-list">${rows}</div>
@@ -1548,24 +1648,60 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         <h1 style="font-size:clamp(26px,7vw,30px); margin-top:6px;">${done} / ${total} finished</h1>
         <div class="results-list">${rows}</div>
         <div class="spacer"></div>
-        ${state.isHost ? `<button class="btn danger" ${done<total?'disabled':''} onclick="TI.revealOnlineResults()">Reveal Results</button>` : `<p class="helper-note">Waiting for the host to reveal results once everyone's done.</p>`}
+        ${state.isHost ? `<button class="btn danger" ${done<total?'disabled':''} onclick="TI.startOnlineVoting()">Start Voting Phase</button>` : `<p class="helper-note">Waiting for the host to start the voting phase...</p>`}
+      </div>`;
+  }
+
+  function renderOnlineVoting(){
+    const myVote = state.onlineVotedFor;
+    const rows = state.onlinePlayers.map(p => {
+      // Don't show a vote button for yourself
+      if (p.uid === state.currentUser.uid) {
+         return `<div class="result-row"><div class="rname">${p.name} (You)</div><div class="rtime">${p.time != null ? formatTime(p.time) : '—'}</div></div>`;
+      }
+      return `
+        <div class="result-row">
+          <div><div class="rname">${p.name}</div><div class="rtag" style="color:var(--muted); font-size: 12px;">Time: ${p.time != null ? formatTime(p.time) : '—'}</div></div>
+          ${myVote ? (myVote === p.uid ? `<span class="rtag" style="color:var(--amber);">VOTED</span>` : '') : `<button class="chip-btn active" style="flex:none; padding:6px 12px; border-color:var(--amber); color:var(--amber); background:rgba(255,184,77,0.1);" onclick="TI.castOnlineVote('${p.uid}')">VOTE IMPOSTER</button>`}
+        </div>`;
+    }).join('');
+
+    return `
+      <div class="screen">
+        <div class="eyebrow">Voting Phase</div>
+        <h1 style="font-size:clamp(26px,7vw,30px); margin-top:6px;">Who is the Imposter?</h1>
+        <p class="sub">Look at the times below and cast your vote.</p>
+        <div class="results-list">${rows}</div>
+        <div class="spacer"></div>
+        ${myVote ? `<p class="helper-note" style="text-align:center;">Waiting for everyone to cast their votes...</p>` : ''}
       </div>`;
   }
 
   function renderOnlineResults(){
     const rows = state.onlinePlayers.map(p => {
       const isImp = p.uid === state.onlineImposterUid;
+      const isSuspected = p.uid === state.onlineSuspectedUid;
       return `
-        <div class="result-row ${isImp?'imposter-row':''}">
-          <div><div class="rname">${p.name}</div>${isImp ? `<span class="rtag">IMPOSTER</span>` : ''}</div>
+        <div class="result-row ${isImp?'imposter-row':''} ${!isImp && isSuspected?'crew-row':''}">
+          <div>
+            <div class="rname">${p.name}</div>
+            ${isImp ? `<span class="rtag">REAL IMPOSTER</span>` : ''}
+            ${isSuspected ? `<span class="rtag" style="color:var(--amber);">VOTED OUT</span>` : ''}
+          </div>
           <div class="rtime">${p.time != null ? formatTime(p.time) : '—'}</div>
         </div>`;
     }).join('');
+
+    const winnerHtml = state.onlineCrewWins 
+      ? `<div class="winner-banner crew">THE CREW WINS!</div><p class="helper-note" style="text-align:center;">The majority caught the Imposter!</p>`
+      : `<div class="winner-banner imposter">IMPOSTER WINS!</div><p class="helper-note" style="text-align:center;">The Crew voted for the wrong person.</p>`;
+
     return `
       <div class="screen">
-        <div class="eyebrow">Results // ${state.multiplier}x Multiplier</div>
+        <div class="eyebrow">Debrief // Online Round</div>
         <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Round Over</h1>
-        <div class="target-banner"><div class="role-label">Target Time Was</div><div class="tval">${formatTime(state.onlineTargetMs)}</div></div>
+        ${winnerHtml}
+        <div class="target-banner" style="margin-top:10px;"><div class="role-label">Target Time Was</div><div class="tval">${formatTime(state.onlineTargetMs)}</div></div>
         <div class="results-list">${rows}</div>
         <div class="spacer"></div>
         <div class="row-gap">
@@ -1590,6 +1726,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       case 'onlineReveal': html = renderOnlineReveal(); break;
       case 'onlineRound': html = renderOnlineRound(); break;
       case 'onlineWaiting': html = renderOnlineWaiting(); break;
+      case 'onlineVoting': html = renderOnlineVoting(); break;
       case 'onlineResults': html = renderOnlineResults(); break;
     }
     app.innerHTML = html;
@@ -1602,7 +1739,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     toggleReveal, nextRound,
     signInWithGoogle, signOut,
     goOnlineHome, createRoom, joinPublicRoom, joinPrivateRoom, exitOnlineToMenu, startOnlineGame,
-    goToOnlineRound, onlineBigButtonTap, goToOnlineWaiting, revealOnlineResults, playAgainOnline
+    goToOnlineRound, onlineBigButtonTap, goToOnlineWaiting, startOnlineVoting, castOnlineVote, playAgainOnline
   };
 
   document.getElementById('versionTag').textContent = GAME_VERSION;
