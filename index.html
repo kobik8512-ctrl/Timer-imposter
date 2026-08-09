@@ -487,7 +487,7 @@
 <div class="corner-version" id="versionTag"></div>
 
 <script>
-const GAME_VERSION = "v13";
+const GAME_VERSION = "v14";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -499,14 +499,6 @@ const firebaseConfig = {
 };
 
 let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
-try {
-  if(firebaseConfig.apiKey && firebaseConfig.apiKey.indexOf('PASTE_') !== 0){
-    fbApp = firebase.initializeApp(firebaseConfig);
-    fbAuth = firebase.auth();
-    fbDb = firebase.firestore();
-    fbReady = true;
-  }
-} catch(e){ console.warn('Firebase init failed:', e); }
 
 (function(){
   const state = {
@@ -543,6 +535,37 @@ try {
     matchRound: 1,
     scores: []
   };
+
+  try {
+    if(firebaseConfig.apiKey && firebaseConfig.apiKey.indexOf('PASTE_') !== 0){
+      fbApp = firebase.initializeApp(firebaseConfig);
+      fbAuth = firebase.auth();
+      fbDb = firebase.firestore();
+      fbReady = true;
+
+      // Enable persistent authentication
+      fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
+
+      // Listen for persistent auth state across page reloads
+      fbAuth.onAuthStateChanged(user => {
+        if (user) {
+          state.currentUser = { uid: user.uid, name: user.displayName || 'Player', photoURL: user.photoURL || '' };
+        } else {
+          state.currentUser = null;
+        }
+        render();
+      });
+
+      // Handle redirect sign-ins (required for PWAs / Mobile App context)
+      fbAuth.getRedirectResult().then(result => {
+        if (result && result.user) {
+          const u = result.user;
+          state.currentUser = { uid: u.uid, name: u.displayName || 'Player', photoURL: u.photoURL || '' };
+          render();
+        }
+      }).catch(err => console.warn('Redirect auth result error:', err));
+    }
+  } catch(e){ console.warn('Firebase init failed:', e); }
 
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   let ctx = null;
@@ -664,15 +687,20 @@ try {
     if(!fbReady){ render(); return; }
     playSFX('click');
     const provider = new firebase.auth.GoogleAuthProvider();
+    
+    // Attempt popup auth first, fall back to redirect if in standalone app / WebView mode
     fbAuth.signInWithPopup(provider).then(result => {
       const u = result.user;
       state.currentUser = { uid: u.uid, name: u.displayName || 'Player', photoURL: u.photoURL || '' };
       render();
     }).catch(err => {
-      console.warn('Sign-in failed:', err);
-      alert('Sign-in failed: ' + err.message);
+      console.warn('Popup sign-in unavailable or blocked, falling back to redirect:', err);
+      fbAuth.signInWithRedirect(provider).catch(redirectErr => {
+        alert('Sign-in failed: ' + redirectErr.message);
+      });
     });
   }
+
   function signOut(){
     playSFX('click');
     if(fbReady) fbAuth.signOut();
@@ -680,6 +708,7 @@ try {
     leaveOnlineRoom();
     render();
   }
+
   function loadSoundPref(){
     try {
       const saved = localStorage.getItem('ti_sound');
