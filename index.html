@@ -376,6 +376,8 @@
     flex-direction:column;
     gap:8px;
     margin: 12px 0;
+    max-height: 220px;
+    overflow-y: auto;
   }
   .result-row{
     display:flex;
@@ -487,7 +489,7 @@
 <div class="corner-version" id="versionTag"></div>
 
 <script>
-const GAME_VERSION = "v14";
+const GAME_VERSION = "v15";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -510,6 +512,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     isHost: false,
     onlineUnsub: null,
     onlinePlayersUnsub: null,
+    publicRoomsUnsub: null,
+    publicRooms: [],
     onlinePlayers: [],
     onlineStatus: null,
     onlineSecret: null,
@@ -520,6 +524,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     numPlayers: 3,
     playerNames: ['Player 1', 'Player 2', 'Player 3'],
     mode: 'standard',
+    multiplier: 1,
     enableClues: true,
     imposterIndex: null,
     targetMs: null,
@@ -543,10 +548,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       fbDb = firebase.firestore();
       fbReady = true;
 
-      // Enable persistent authentication
       fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
 
-      // Listen for persistent auth state across page reloads
       fbAuth.onAuthStateChanged(user => {
         if (user) {
           state.currentUser = { uid: user.uid, name: user.displayName || 'Player', photoURL: user.photoURL || '' };
@@ -556,7 +559,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         render();
       });
 
-      // Handle redirect sign-ins (required for PWAs / Mobile App context)
       fbAuth.getRedirectResult().then(result => {
         if (result && result.user) {
           const u = result.user;
@@ -676,6 +678,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.playerNames = ['Player 1', 'Player 2', 'Player 3'];
       state.matchRound = 1;
       state.scores = [];
+      state.multiplier = 1;
     }
   }
 
@@ -688,7 +691,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     playSFX('click');
     const provider = new firebase.auth.GoogleAuthProvider();
     
-    // Attempt popup auth first, fall back to redirect if in standalone app / WebView mode
     fbAuth.signInWithPopup(provider).then(result => {
       const u = result.user;
       state.currentUser = { uid: u.uid, name: u.displayName || 'Player', photoURL: u.photoURL || '' };
@@ -736,6 +738,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.playerNames[idx] = val || `Player ${idx+1}`;
   }
   function setMode(m){ playSFX('click'); state.mode = m; render(); }
+  function setMultiplier(mult){ playSFX('click'); state.multiplier = mult; render(); }
   function toggleClues(){ playSFX('click'); state.enableClues = !state.enableClues; render(); }
 
   function beginReveal(){
@@ -834,7 +837,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     });
 
     if(winnerIdx !== null){
-      state.scores[winnerIdx] = (state.scores[winnerIdx] || 0) + 1;
+      const pts = 1 * (state.multiplier || 1);
+      state.scores[winnerIdx] = (state.scores[winnerIdx] || 0) + pts;
     }
 
     render();
@@ -858,20 +862,51 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     if(!fbReady){ state.showAccounts = true; render(); return; }
     if(!state.currentUser){ state.showAccounts = true; render(); return; }
     state.screen = 'onlineHome';
+    subscribeToPublicRooms();
     render();
   }
 
-  function createRoom(mode, enableClues){
+  function subscribeToPublicRooms(){
+    if(!fbReady) return;
+    if(state.publicRoomsUnsub) state.publicRoomsUnsub();
+    state.publicRoomsUnsub = fbDb.collection('rooms')
+      .where('isPrivate', '==', false)
+      .where('status', '==', 'waiting')
+      .onSnapshot(snap => {
+        state.publicRooms = [];
+        snap.forEach(doc => state.publicRooms.push({ code: doc.id, ...doc.data() }));
+        render();
+      });
+  }
+
+  function createRoom(isPrivate){
     if(!fbReady || !state.currentUser) return;
     playSFX('click');
+    
+    let roomName = 'Public Room';
+    let password = '';
+
+    if(isPrivate){
+      roomName = prompt('Enter Room Name:') || 'Private Room';
+      password = prompt('Enter Room Password:');
+      if(!password){ alert('Password is required for private rooms.'); return; }
+    } else {
+      roomName = prompt('Enter Public Room Name:') || `${state.currentUser.name}'s Room`;
+    }
+
     const code = genRoomCode();
     state.roomCode = code;
     state.isHost = true;
+    
     fbDb.collection('rooms').doc(code).set({
       hostUid: state.currentUser.uid,
+      roomName: roomName,
+      isPrivate: isPrivate,
+      password: password || null,
       status: 'waiting',
-      mode: mode || 'standard',
-      enableClues: enableClues !== false,
+      mode: state.mode || 'standard',
+      multiplier: state.multiplier || 1,
+      enableClues: state.enableClues !== false,
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     }).then(() => {
       return fbDb.collection('rooms').doc(code).collection('players').doc(state.currentUser.uid).set({
@@ -884,14 +919,39 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     }).catch(err => alert('Could not create room: ' + err.message));
   }
 
-  function joinRoom(code){
+  function joinPublicRoom(code){
     if(!fbReady || !state.currentUser) return;
     playSFX('click');
-    code = (code || '').toUpperCase().trim();
-    if(code.length !== 4) { alert('Room codes are 4 characters.'); return; }
+    joinRoomByCode(code);
+  }
+
+  function joinPrivateRoom(){
+    if(!fbReady || !state.currentUser) return;
+    playSFX('click');
+    const roomName = prompt('Enter Private Room Name to Search:');
+    if(!roomName) return;
+    const password = prompt('Enter Room Password:');
+
+    fbDb.collection('rooms')
+      .where('isPrivate', '==', true)
+      .where('roomName', '==', roomName.trim())
+      .get().then(snap => {
+        if(snap.empty){ alert('No private room found with that name.'); return; }
+        let matchedDoc = null;
+        snap.forEach(doc => {
+          if(doc.data().password === password) matchedDoc = doc;
+        });
+        if(!matchedDoc){ alert('Incorrect password.'); return; }
+        if(matchedDoc.data().status !== 'waiting'){ alert('That room has already started.'); return; }
+
+        joinRoomByCode(matchedDoc.id);
+      }).catch(err => alert('Could not join room: ' + err.message));
+  }
+
+  function joinRoomByCode(code){
     const roomRef = fbDb.collection('rooms').doc(code);
     roomRef.get().then(doc => {
-      if(!doc.exists){ alert('No room found with that code.'); return; }
+      if(!doc.exists){ alert('No room found.'); return; }
       if(doc.data().status !== 'waiting'){ alert('That room has already started.'); return; }
       state.roomCode = code;
       state.isHost = false;
@@ -915,6 +975,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.onlineStatus = data.status;
       state.onlineImposterUid = data.imposterUid || null;
       state.onlineTargetMs = data.targetMs || null;
+      if(data.multiplier) state.multiplier = data.multiplier;
 
       if(data.status === 'reveal' && !state.onlineSecret){
         fbDb.collection('rooms').doc(code).collection('secrets').doc(state.currentUser.uid).get().then(sdoc => {
@@ -940,8 +1001,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function unsubscribeOnline(){
     if(state.onlineUnsub) state.onlineUnsub();
     if(state.onlinePlayersUnsub) state.onlinePlayersUnsub();
+    if(state.publicRoomsUnsub) state.publicRoomsUnsub();
     state.onlineUnsub = null;
     state.onlinePlayersUnsub = null;
+    state.publicRoomsUnsub = null;
   }
 
   function leaveOnlineRoom(){
@@ -1062,36 +1125,26 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         <div class="modal-card" onclick="event.stopPropagation()">
           <div class="eyebrow">Briefing // Manual</div>
           <h2 class="modal-title">HOW TO PLAY</h2>
-          <p class="help-body" style="margin-bottom:18px;">One phone gets passed around the group. Here's exactly what happens, step by step, using a 3-player example:</p>
+          <p class="help-body" style="margin-bottom:18px;">One phone gets passed around the group or play online on your own screens:</p>
 
           <div class="help-step">
             <div class="help-num">1</div>
-            <div class="help-body"><strong>Set up the game.</strong> Enter how many people are playing and type in everyone's name. Pick a mode — Fast, Standard, or Marathon — which decides how long the secret time will roughly be.</div>
+            <div class="help-body"><strong>Set up the game.</strong> Choose squad size, game mode, and point multiplier (1x, 2x, or 3x).</div>
           </div>
 
           <div class="help-step">
             <div class="help-num">2</div>
-            <div class="help-body"><strong>Secret briefing (one player at a time).</strong> The phone gets handed to Player 1 privately. They tap to reveal their card. Almost everyone sees the exact <strong>target time</strong> — for example <strong>04:50</strong>, meaning 4 seconds and 50 hundredths. One random player instead becomes the <strong>Imposter</strong> and does NOT see the target — they might get a vague clue instead, like "somewhere between 3s and 7s," if clues are turned on. Pass the phone to the next player and repeat until everyone has secretly seen their card. No one should see anyone else's screen.</div>
+            <div class="help-body"><strong>Secret briefing.</strong> Everyone sees the exact target time except the Imposter who gets a vague range hint.</div>
           </div>
 
           <div class="help-step">
             <div class="help-num">3</div>
-            <div class="help-body"><strong>The blind stopwatch (one player at a time, in random order).</strong> Each player gets the phone for their turn. Tap the button once to <strong>start</strong> a hidden timer — you can't see any numbers while it's counting. Tap it again to <strong>stop</strong> whenever you think the exact target time has passed. If you knew the real target, try to land as close to it as possible. If you're the Imposter, you're just guessing blind — try not to guess too far off, or everyone will suspect you!</div>
+            <div class="help-body"><strong>The blind stopwatch.</strong> Tap once to start the hidden timer and tap again to stop on your secret target time.</div>
           </div>
 
           <div class="help-step">
             <div class="help-num">4</div>
-            <div class="help-body"><strong>Compare times together.</strong> Once everyone's had their turn, look at the results screen as a group. All the final times are shown side by side. Talk it out — whoever's time looks the most "off" from the others might be the Imposter.</div>
-          </div>
-
-          <div class="help-step">
-            <div class="help-num">5</div>
-            <div class="help-body"><strong>Reveal &amp; score.</strong> Tap "Reveal Imposter" to see who it really was and what the real target time was. Whoever (besides the Imposter) landed closest to the target earns a point. Scores carry over if you keep playing more rounds.</div>
-          </div>
-
-          <div class="help-step">
-            <div class="help-num">6</div>
-            <div class="help-body"><strong>Play again.</strong> Tap "Play Next Round" for a new secret time and a new random Imposter, or "Main Menu" to change the player list or settings.</div>
+            <div class="help-body"><strong>Reveal &amp; score.</strong> Reveal the imposter. The closest non-imposter player wins points scaled by the selected multiplier!</div>
           </div>
 
           <button class="btn solid" style="margin-top:20px;" onclick="TI.toggleHelp(false)">Got It</button>
@@ -1107,7 +1160,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           <div class="modal-card" onclick="event.stopPropagation()">
             <div class="eyebrow">Setup Needed</div>
             <h2 class="modal-title">ONLINE NOT SET UP YET</h2>
-            <p class="help-body">Sign-in and Online Play need a free Firebase project connected first. This game works fully offline in the meantime — no account needed for pass-and-play.</p>
+            <p class="help-body">Sign-in and Online Play need a free Firebase project connected first.</p>
             <button class="btn solid" style="margin-top:16px;" onclick="TI.toggleAccounts(false)">Got It</button>
           </div>
         </div>`;
@@ -1142,7 +1195,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       <div class="screen" style="justify-content:center; align-items:flex-start;">
         <div class="eyebrow">Classified Op // Pass &amp; Play</div>
         <h1 class="title-main">TIMER<br>IMPOSTER</h1>
-        <p class="sub">One phone. Everyone but one player memorizes a secret target time.<br>Blind-tap a hidden stopwatch and catch the imposter!</p>
+        <p class="sub">Everyone but one player knows the secret target time.<br>Blind-tap the hidden stopwatch and catch the imposter!</p>
         ${signedIn ? `<p class="helper-note" style="margin-top:10px;">Signed in as <strong style="color:var(--green);">${state.currentUser.name}</strong></p>` : ''}
         <div class="spacer"></div>
         <div class="row-gap" style="width:100%;">
@@ -1181,9 +1234,15 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         <div class="card">
           <div class="role-label">Game Mode</div>
           <div class="mode-selector">
-            <button class="chip-btn ${state.mode==='fast'?'active':''}" onclick="TI.setMode('fast')">⚡ Fast (0.5-3s)</button>
-            <button class="chip-btn ${state.mode==='standard'?'active':''}" onclick="TI.setMode('standard')">🎯 Standard (1-9s)</button>
-            <button class="chip-btn ${state.mode==='marathon'?'active':''}" onclick="TI.setMode('marathon')">⏱ Marathon (10-20s)</button>
+            <button class="chip-btn ${state.mode==='fast'?'active':''}" onclick="TI.setMode('fast')">⚡ Fast</button>
+            <button class="chip-btn ${state.mode==='standard'?'active':''}" onclick="TI.setMode('standard')">🎯 Standard</button>
+            <button class="chip-btn ${state.mode==='marathon'?'active':''}" onclick="TI.setMode('marathon')">⏱ Marathon</button>
+          </div>
+          <div class="role-label" style="margin-top:12px;">Point Multiplier</div>
+          <div class="mode-selector">
+            <button class="chip-btn ${state.multiplier===1?'active':''}" onclick="TI.setMultiplier(1)">1x Points</button>
+            <button class="chip-btn ${state.multiplier===2?'active':''}" onclick="TI.setMultiplier(2)">2x Points</button>
+            <button class="chip-btn ${state.multiplier===3?'active':''}" onclick="TI.setMultiplier(3)">3x Points</button>
           </div>
           <div class="role-label" style="margin-top:12px;">Imposter Clue Hint</div>
           <div class="option-toggle">
@@ -1340,7 +1399,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
     return `
       <div class="screen">
-        <div class="eyebrow">Match Debrief // Round ${state.matchRound}</div>
+        <div class="eyebrow">Match Debrief // Round ${state.matchRound} (${state.multiplier}x Multiplier)</div>
         <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Results</h1>
         
         <div class="scoreboard">${scoresList}</div>
@@ -1363,25 +1422,48 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   function renderOnlineHome(){
+    const publicList = state.publicRooms.length > 0 ? state.publicRooms.map(r => `
+      <div class="result-row">
+        <div>
+          <div class="rname">${r.roomName || 'Public Room'}</div>
+          <span style="font-size:12px; color:var(--muted);">${r.mode.toUpperCase()} • ${r.multiplier || 1}x MULTIPLIER</span>
+        </div>
+        <button class="chip-btn active" style="flex:none; padding:6px 12px;" onclick="TI.joinPublicRoom('${r.code}')">Join</button>
+      </div>
+    `).join('') : `<p class="helper-note" style="text-align:center; padding:12px;">No active public rooms right now.</p>`;
+
     return `
       <div class="screen">
         <div class="eyebrow">Online // Rooms</div>
         <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Play Online</h1>
-        <p class="sub">Everyone plays on their own phone. Create a room and share the 4-character code with friends.</p>
-        <div class="spacer"></div>
+        
         <div class="card">
-          <div class="role-label">Create a room</div>
+          <div class="role-label">Room Config</div>
           <div class="mode-selector">
-            <button class="chip-btn" onclick="TI.createRoom('fast', true)">⚡ Fast</button>
-            <button class="chip-btn" onclick="TI.createRoom('standard', true)">🎯 Standard</button>
-            <button class="chip-btn" onclick="TI.createRoom('marathon', true)">⏱ Marathon</button>
+            <button class="chip-btn ${state.mode==='fast'?'active':''}" onclick="TI.setMode('fast')">⚡ Fast</button>
+            <button class="chip-btn ${state.mode==='standard'?'active':''}" onclick="TI.setMode('standard')">🎯 Standard</button>
+            <button class="chip-btn ${state.mode==='marathon'?'active':''}" onclick="TI.setMode('marathon')">⏱ Marathon</button>
+          </div>
+          <div class="mode-selector" style="margin-top:8px;">
+            <button class="chip-btn ${state.multiplier===1?'active':''}" onclick="TI.setMultiplier(1)">1x Mult</button>
+            <button class="chip-btn ${state.multiplier===2?'active':''}" onclick="TI.setMultiplier(2)">2x Mult</button>
+            <button class="chip-btn ${state.multiplier===3?'active':''}" onclick="TI.setMultiplier(3)">3x Mult</button>
+          </div>
+          <div style="display:flex; gap:8px; margin-top:12px;">
+            <button class="btn solid" style="font-size:16px; padding:10px;" onclick="TI.createRoom(false)">+ Create Public</button>
+            <button class="btn solid" style="font-size:16px; padding:10px;" onclick="TI.createRoom(true)">🔒 Create Private</button>
           </div>
         </div>
+
         <div class="card">
-          <div class="role-label">Join a room</div>
-          <input class="input-field" id="joinCodeInput" type="text" maxlength="4" placeholder="Enter 4-character code" style="text-transform:uppercase; text-align:center; font-family:'Space Mono',monospace; font-size:20px; letter-spacing:.2em;" />
-          <button class="btn solid" style="margin-top:10px;" onclick="TI.joinRoom(document.getElementById('joinCodeInput').value)">Join Room</button>
+          <div class="role-label">Join Private Room</div>
+          <button class="btn ghost" style="font-size:16px; padding:10px;" onclick="TI.joinPrivateRoom()">🔑 Enter Name &amp; Password</button>
         </div>
+
+        <div class="role-label">Active Public Rooms</div>
+        <div class="results-list">${publicList}</div>
+
+        <div class="spacer"></div>
         <button class="btn ghost" onclick="TI.goStart()">Back</button>
       </div>`;
   }
@@ -1392,9 +1474,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     `).join('');
     return `
       <div class="screen">
-        <div class="eyebrow">Room Lobby</div>
+        <div class="eyebrow">Room Lobby // ${state.multiplier}x Multiplier</div>
         <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Code: ${state.roomCode}</h1>
-        <p class="sub">Share this code with friends. They tap "Play Online" → "Join Room" and enter it. Need at least 3 players.</p>
+        <p class="sub">Waiting for players to join. Need at least 3 players.</p>
         <div class="results-list">${rows}</div>
         <div class="spacer"></div>
         <div class="row-gap">
@@ -1481,7 +1563,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     }).join('');
     return `
       <div class="screen">
-        <div class="eyebrow">Results</div>
+        <div class="eyebrow">Results // ${state.multiplier}x Multiplier</div>
         <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Round Over</h1>
         <div class="target-banner"><div class="role-label">Target Time Was</div><div class="tval">${formatTime(state.onlineTargetMs)}</div></div>
         <div class="results-list">${rows}</div>
@@ -1514,12 +1596,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   window.TI = {
-    goStart, toggleHelp, toggleAccounts, toggleAudio, goSetup, changePlayers, updateName, setMode, toggleClues,
+    goStart, toggleHelp, toggleAccounts, toggleAudio, goSetup, changePlayers, updateName, setMode, setMultiplier, toggleClues,
     beginReveal, revealHandoffTap, revealCardTap, revealNext,
     goToGame, roundHandoffTap, bigButtonTap, nextPlayerTap, skipTurn,
     toggleReveal, nextRound,
     signInWithGoogle, signOut,
-    goOnlineHome, createRoom, joinRoom, exitOnlineToMenu, startOnlineGame,
+    goOnlineHome, createRoom, joinPublicRoom, joinPrivateRoom, exitOnlineToMenu, startOnlineGame,
     goToOnlineRound, onlineBigButtonTap, goToOnlineWaiting, revealOnlineResults, playAgainOnline
   };
 
