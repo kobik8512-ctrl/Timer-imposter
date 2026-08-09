@@ -3,7 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
-<title>TIMER IMPOSTER</title>
+<title>Timer Imposter - Free Pass & Play Party Game</title>
+<meta name="description" content="Timer Imposter is a free pass-and-play party game. Everyone but one player secretly knows a target time — blind-tap a hidden stopwatch and catch the imposter. Play free, no signup, works offline.">
+<meta name="keywords" content="timer imposter, timer imposter game, pass and play games, party games, stopwatch game, imposter game">
+<meta property="og:title" content="Timer Imposter - Free Pass & Play Party Game">
+<meta property="og:description" content="Everyone but one player knows a secret target time. Blind-tap a hidden stopwatch and catch the imposter. Free, no signup.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://kobik8512-ctrl.github.io/Timer-imposter/">
+<meta property="og:image" content="https://kobik8512-ctrl.github.io/Timer-imposter/icon-512.png">
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0a0d0b">
 <link rel="icon" href="icon-192.png">
@@ -493,12 +500,15 @@
   v8 — added joke "offline paywall" prank screen (not a real charge, just a gag)
   v9 — swapped ₾ for $ in the paywall joke
   v10 — removed offline paywall joke (broke on the WebView app since it needs internet to load at all); fixed duplicate-name score bug (scores now tracked by player position, not name text); rewrote How to Play with a full concrete walkthrough
+  v11 — added "Skip My Turn" button during rounds; sound on/off preference now persists between sessions; added "Sign in with Google" button on start screen (UI placeholder only — real accounts need a Firebase project to be set up before this can actually work)
+  v12 — added SEO meta tags (title, description, Open Graph) for search visibility; added robots.txt and sitemap.xml
 */
-const GAME_VERSION = "v10";
+const GAME_VERSION = "v12";
 (function(){
   const state = {
     screen: 'start',
     showHelp: false,
+    showAccounts: false,
     soundEnabled: true,
     numPlayers: 3,
     playerNames: ['Player 1', 'Player 2', 'Player 3'],
@@ -635,8 +645,19 @@ const GAME_VERSION = "v10";
   // ---- Actions ----
   function goStart(){ playSFX('click'); state.screen='start'; render(); }
   function toggleHelp(show){ playSFX('click'); state.showHelp = show; render(); }
+  function toggleAccounts(show){ playSFX('click'); state.showAccounts = show; render(); }
+  function loadSoundPref(){
+    try {
+      const saved = localStorage.getItem('ti_sound');
+      if(saved !== null) state.soundEnabled = saved === '1';
+    } catch(e){}
+  }
+  function saveSoundPref(){
+    try { localStorage.setItem('ti_sound', state.soundEnabled ? '1' : '0'); } catch(e){}
+  }
   function toggleAudio(){
     state.soundEnabled = !state.soundEnabled;
+    saveSoundPref();
     const btn = document.getElementById('audioToggle');
     btn.textContent = state.soundEnabled ? '🔊' : '🔇';
     btn.classList.toggle('active', state.soundEnabled);
@@ -719,6 +740,19 @@ const GAME_VERSION = "v10";
       render();
     }
   }
+  function skipTurn(){
+    playSFX('click');
+    vibrate(10);
+    const playerIdx = state.playerOrder[state.roundIndex];
+    state.times[playerIdx] = 'SKIP';
+    if(state.roundIndex < state.numPlayers - 1){
+      state.roundIndex++;
+      state.roundPhase = 'handoff';
+    } else {
+      state.screen = 'results';
+    }
+    render();
+  }
   function toggleReveal(){
     playSFX('reveal');
     state.resultsRevealed = true;
@@ -728,7 +762,7 @@ const GAME_VERSION = "v10";
     let winnerIdx = null;
 
     state.playerNames.forEach((_, i) => {
-      if(i !== state.imposterIndex && state.times[i] !== undefined){
+      if(i !== state.imposterIndex && state.times[i] !== undefined && state.times[i] !== 'SKIP'){
         const diff = Math.abs(state.times[i] - state.targetMs);
         if(diff < bestDiff){
           bestDiff = diff;
@@ -795,6 +829,19 @@ const GAME_VERSION = "v10";
       </div>`;
   }
 
+  function renderAccountsModal(){
+    if(!state.showAccounts) return '';
+    return `
+      <div class="modal-overlay" onclick="TI.toggleAccounts(false)">
+        <div class="modal-card" onclick="event.stopPropagation()">
+          <div class="eyebrow">Coming Soon</div>
+          <h2 class="modal-title">ONLINE ACCOUNTS</h2>
+          <p class="help-body">Sign-in and online multiplayer are in development! For now, Timer Imposter is fully offline and works great as pass-and-play — no account needed.</p>
+          <button class="btn solid" style="margin-top:16px;" onclick="TI.toggleAccounts(false)">Got It</button>
+        </div>
+      </div>`;
+  }
+
   function renderStart(){
     return `
       <div class="screen" style="justify-content:center; align-items:flex-start;">
@@ -805,9 +852,11 @@ const GAME_VERSION = "v10";
         <div class="row-gap" style="width:100%;">
           <button class="btn solid" onclick="TI.goSetup()">Start Game</button>
           <button class="btn ghost" onclick="TI.toggleHelp(true)">How to Play</button>
+          <button class="btn ghost" onclick="TI.toggleAccounts(true)">🔐 Sign in with Google</button>
         </div>
       </div>
-      ${renderHelpModal()}`;
+      ${renderHelpModal()}
+      ${renderAccountsModal()}`;
   }
 
   function renderSetup(){
@@ -938,6 +987,7 @@ const GAME_VERSION = "v10";
             <div class="player-num">Hand the phone to</div>
             <div class="player-name">${pName}</div>
             <button class="btn solid" style="max-width:280px;" onclick="TI.roundHandoffTap()">I'm ${pName} — Continue</button>
+            <button class="btn ghost" style="max-width:280px; margin-top:10px;" onclick="TI.skipTurn()">Skip My Turn</button>
           </div>
         </div>`;
     }
@@ -973,13 +1023,14 @@ const GAME_VERSION = "v10";
     let rows = '';
     for(let i=0; i<state.numPlayers; i++){
       const isImp = state.resultsRevealed && i === state.imposterIndex;
+      const skipped = state.times[i] === 'SKIP';
       rows += `
         <div class="result-row ${isImp?'imposter-row':''}">
           <div>
             <div class="rname">${state.playerNames[i]}</div>
             ${isImp ? `<span class="rtag">IMPOSTER</span>` : ''}
           </div>
-          <div class="rtime">${formatTime(state.times[i])}</div>
+          <div class="rtime" style="${skipped ? 'font-size:15px; color:var(--muted);' : ''}">${skipped ? 'SKIPPED' : formatTime(state.times[i])}</div>
         </div>`;
     }
 
@@ -1029,13 +1080,17 @@ const GAME_VERSION = "v10";
   }
 
   window.TI = {
-    goStart, toggleHelp, toggleAudio, goSetup, changePlayers, updateName, setMode, toggleClues,
+    goStart, toggleHelp, toggleAccounts, toggleAudio, goSetup, changePlayers, updateName, setMode, toggleClues,
     beginReveal, revealHandoffTap, revealCardTap, revealNext,
-    goToGame, roundHandoffTap, bigButtonTap, nextPlayerTap,
+    goToGame, roundHandoffTap, bigButtonTap, nextPlayerTap, skipTurn,
     toggleReveal, nextRound
   };
 
   document.getElementById('versionTag').textContent = GAME_VERSION;
+  loadSoundPref();
+  const initBtn = document.getElementById('audioToggle');
+  initBtn.textContent = state.soundEnabled ? '🔊' : '🔇';
+  initBtn.classList.toggle('active', state.soundEnabled);
   render();
 })();
 
