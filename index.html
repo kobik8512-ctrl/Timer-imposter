@@ -545,7 +545,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     numPlayers: 3,
     playerNames: ['Player 1', 'Player 2', 'Player 3'],
     mode: 'standard',
-    multiplier: 1,
     enableClues: true,
     imposterIndex: null,
     targetMs: null,
@@ -699,7 +698,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.playerNames = ['Player 1', 'Player 2', 'Player 3'];
       state.matchRound = 1;
       state.scores = [];
-      state.multiplier = 1;
     }
   }
 
@@ -759,7 +757,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.playerNames[idx] = val || `Player ${idx+1}`;
   }
   function setMode(m){ playSFX('click'); state.mode = m; render(); }
-  function setMultiplier(mult){ playSFX('click'); state.multiplier = mult; render(); }
   function toggleClues(){ playSFX('click'); state.enableClues = !state.enableClues; render(); }
 
   function beginReveal(){
@@ -858,7 +855,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     });
 
     if(winnerIdx !== null){
-      const pts = 1 * (state.multiplier || 1);
+      const pts = 1;
       state.scores[winnerIdx] = (state.scores[winnerIdx] || 0) + pts;
     }
 
@@ -936,7 +933,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       status: 'waiting',
       maxPlayers: state.onlineMaxPlayers,
       mode: state.mode || 'standard',
-      multiplier: state.multiplier || 1,
       enableClues: state.enableClues !== false,
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     }).then(() => {
@@ -985,7 +981,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       if(!doc.exists){ alert('No room found.'); return; }
       if(doc.data().status !== 'waiting'){ alert('That room has already started.'); return; }
       
-      // Check Max Players
       return roomRef.collection('players').get().then(snap => {
           if(snap.size >= (doc.data().maxPlayers || 10)){
               alert('This room is full!');
@@ -1019,8 +1014,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.onlineSuspectedUid = data.suspectedUid || null;
       state.onlineCrewWins = data.crewWins || false;
 
-      if(data.multiplier) state.multiplier = data.multiplier;
-
       if(data.status === 'reveal' && !state.onlineSecret){
         fbDb.collection('rooms').doc(code).collection('secrets').doc(state.currentUser.uid).get().then(sdoc => {
           if(sdoc.exists){ state.onlineSecret = sdoc.data(); render(); }
@@ -1044,7 +1037,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.onlinePlayers = [];
       snap.forEach(d => state.onlinePlayers.push({ uid: d.id, ...d.data() }));
       
-      // Auto tally votes for host
       if(state.isHost && state.onlineStatus === 'voting'){
           const allVoted = state.onlinePlayers.every(p => p.votedFor);
           if(allVoted) tallyOnlineVotes();
@@ -1183,7 +1175,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       
       const crewWins = suspectedUid === imposterUid;
       
-      // Update room to revealed status and declare winner
       roomRef.update({
         status: 'revealed',
         imposterUid: imposterUid,
@@ -1209,7 +1200,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         crewWins: firebase.firestore.FieldValue.delete()
     });
     
-    // Clear player votes
     state.onlinePlayers.forEach(p => {
         roomRef.collection('players').doc(p.uid).update({ votedFor: null, submitted: false, time: null });
     });
@@ -1229,7 +1219,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
           <div class="help-step">
             <div class="help-num">1</div>
-            <div class="help-body"><strong>Set up the game.</strong> Choose squad size, game mode, and point multiplier.</div>
+            <div class="help-body"><strong>Set up the game.</strong> Choose squad size and game mode.</div>
           </div>
 
           <div class="help-step">
@@ -1300,7 +1290,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         <div class="spacer"></div>
         <div class="row-gap" style="width:100%;">
           <button class="btn solid" onclick="TI.goSetup()">Start Game (Local)</button>
-          <button class="btn ghost" onclick="TI.goOnlineHome()">🌐 Play Online</button>
+          <button class="btn ghost" onclick="TI.goOnlineHome()">🌐 Play Online (Not Working)</button>
           <button class="btn ghost" onclick="TI.toggleHelp(true)">How to Play</button>
           <button class="btn ghost" onclick="TI.toggleAccounts(true)">${signedIn ? '👤 Account' : '🔐 Sign in with Google'}</button>
         </div>
@@ -1338,12 +1328,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             <button class="chip-btn ${state.mode==='standard'?'active':''}" onclick="TI.setMode('standard')">🎯 Standard</button>
             <button class="chip-btn ${state.mode==='marathon'?'active':''}" onclick="TI.setMode('marathon')">⏱ Marathon</button>
           </div>
-          <div class="role-label" style="margin-top:12px;">Point Multiplier</div>
-          <div class="mode-selector">
-            <button class="chip-btn ${state.multiplier===1?'active':''}" onclick="TI.setMultiplier(1)">1x Points</button>
-            <button class="chip-btn ${state.multiplier===2?'active':''}" onclick="TI.setMultiplier(2)">2x Points</button>
-            <button class="chip-btn ${state.multiplier===3?'active':''}" onclick="TI.setMultiplier(3)">3x Points</button>
-          </div>
           <div class="role-label" style="margin-top:12px;">Imposter Clue Hint</div>
           <div class="option-toggle">
             <button class="chip-btn ${state.enableClues?'active':''}" onclick="TI.toggleClues()">${state.enableClues ? 'ON (Gives range hint)' : 'OFF (Pure Blind)'}</button>
@@ -1368,7 +1352,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             <div class="player-name">${pName}</div>
             <button class="btn solid" style="max-width:280px;" onclick="TI.revealHandoffTap()">I'm ${pName} — Continue</button>
           </div>
-        </div>`;
+        `;
     }
 
     if(state.revealPhase === 'card'){
@@ -1499,7 +1483,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
     return `
       <div class="screen">
-        <div class="eyebrow">Match Debrief // Round ${state.matchRound} (${state.multiplier}x Multiplier)</div>
+        <div class="eyebrow">Match Debrief // Round ${state.matchRound}</div>
         <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Results</h1>
         
         <div class="scoreboard">${scoresList}</div>
@@ -1535,7 +1519,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     return `
       <div class="screen">
         <div class="eyebrow">Online // Rooms</div>
-        <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Play Online</h1>
+        <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Play Online (Not Working)</h1>
         
         <div class="card">
           <div class="role-label">Room Config</div>
@@ -1543,11 +1527,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             <button class="chip-btn ${state.mode==='fast'?'active':''}" onclick="TI.setMode('fast')">⚡ Fast</button>
             <button class="chip-btn ${state.mode==='standard'?'active':''}" onclick="TI.setMode('standard')">🎯 Standard</button>
             <button class="chip-btn ${state.mode==='marathon'?'active':''}" onclick="TI.setMode('marathon')">⏱ Marathon</button>
-          </div>
-          <div class="mode-selector" style="margin-top:8px;">
-            <button class="chip-btn ${state.multiplier===1?'active':''}" onclick="TI.setMultiplier(1)">1x Mult</button>
-            <button class="chip-btn ${state.multiplier===2?'active':''}" onclick="TI.setMultiplier(2)">2x Mult</button>
-            <button class="chip-btn ${state.multiplier===3?'active':''}" onclick="TI.setMultiplier(3)">3x Mult</button>
           </div>
           <div style="display:flex; gap:8px; margin-top:12px;">
             <button class="btn solid" style="font-size:16px; padding:10px;" onclick="TI.createRoom(false)">+ Create Public</button>
@@ -1655,7 +1634,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function renderOnlineVoting(){
     const myVote = state.onlineVotedFor;
     const rows = state.onlinePlayers.map(p => {
-      // Don't show a vote button for yourself
       if (p.uid === state.currentUser.uid) {
          return `<div class="result-row"><div class="rname">${p.name} (You)</div><div class="rtime">${p.time != null ? formatTime(p.time) : '—'}</div></div>`;
       }
@@ -1733,7 +1711,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   window.TI = {
-    goStart, toggleHelp, toggleAccounts, toggleAudio, goSetup, changePlayers, updateName, setMode, setMultiplier, toggleClues,
+    goStart, toggleHelp, toggleAccounts, toggleAudio, goSetup, changePlayers, updateName, setMode, toggleClues,
     beginReveal, revealHandoffTap, revealCardTap, revealNext,
     goToGame, roundHandoffTap, bigButtonTap, nextPlayerTap, skipTurn,
     toggleReveal, nextRound,
