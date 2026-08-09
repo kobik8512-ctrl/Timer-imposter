@@ -17,6 +17,9 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
   :root{
     --bg: #0a0d0b;
@@ -137,7 +140,6 @@
     margin-bottom:12px;
   }
 
-  /* Setup Stepper & Options */
   .stepper{
     display:flex;
     align-items:center;
@@ -208,7 +210,6 @@
     background:rgba(77,255,156,0.08);
   }
 
-  /* Handoff pass screen */
   .handoff-wrap{
     flex:1;
     display:flex;
@@ -235,7 +236,6 @@
   }
   .hand-icon{ font-size:44px; opacity:.85; margin-bottom:8px; }
 
-  /* Redacted reveal card */
   .reveal-box{
     position:relative;
     border:1px solid var(--line);
@@ -304,7 +304,6 @@
     line-height:1.4;
   }
 
-  /* Game round */
   .round-wrap{
     flex:1;
     display:flex;
@@ -358,7 +357,6 @@
     letter-spacing:.18em;
   }
 
-  /* Results */
   .scoreboard{
     display:flex;
     justify-content:space-around;
@@ -424,7 +422,6 @@
     font-weight:700;
   }
 
-  /* Modal */
   .modal-overlay{
     position:fixed; inset:0;
     background:rgba(10, 13, 11, 0.92);
@@ -490,29 +487,47 @@
 <div class="corner-version" id="versionTag"></div>
 
 <script>
-/*
-  TIMER IMPOSTER — version log
-  v1-v3 — core gameplay, pass-and-play, versioning
-  v4 — added help modal
-  v5 — added custom modes, player names, clues, voting, audio SFX, multi-round scores
-  v6 — removed voting screen, direct flow to results
-  v7 — restored PWA manifest/icon links in <head> (needed for GitHub Pages / APK install to keep working)
-  v8 — added joke "offline paywall" prank screen (not a real charge, just a gag)
-  v9 — swapped ₾ for $ in the paywall joke
-  v10 — removed offline paywall joke (broke on the WebView app since it needs internet to load at all); fixed duplicate-name score bug (scores now tracked by player position, not name text); rewrote How to Play with a full concrete walkthrough
-  v11 — added "Skip My Turn" button during rounds; sound on/off preference now persists between sessions; added "Sign in with Google" button on start screen (UI placeholder only — real accounts need a Firebase project to be set up before this can actually work)
-  v12 — added SEO meta tags (title, description, Open Graph) for search visibility; added robots.txt and sitemap.xml
-*/
-const GAME_VERSION = "v12";
+const GAME_VERSION = "v13";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
+  authDomain: "timer-imposter.firebaseapp.com",
+  projectId: "timer-imposter",
+  storageBucket: "timer-imposter.firebasestorage.app",
+  messagingSenderId: "173473961509",
+  appId: "1:173473961509:web:03040fa242a3e6006f51cc"
+};
+
+let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
+try {
+  if(firebaseConfig.apiKey && firebaseConfig.apiKey.indexOf('PASTE_') !== 0){
+    fbApp = firebase.initializeApp(firebaseConfig);
+    fbAuth = firebase.auth();
+    fbDb = firebase.firestore();
+    fbReady = true;
+  }
+} catch(e){ console.warn('Firebase init failed:', e); }
+
 (function(){
   const state = {
     screen: 'start',
     showHelp: false,
     showAccounts: false,
+    currentUser: null,
+    roomCode: null,
+    isHost: false,
+    onlineUnsub: null,
+    onlinePlayersUnsub: null,
+    onlinePlayers: [],
+    onlineStatus: null,
+    onlineSecret: null,
+    onlineImposterUid: null,
+    onlineTargetMs: null,
+    onlineRoundPhase: 'ready',
     soundEnabled: true,
     numPlayers: 3,
     playerNames: ['Player 1', 'Player 2', 'Player 3'],
-    mode: 'standard', // 'fast', 'standard', 'marathon'
+    mode: 'standard',
     enableClues: true,
     imposterIndex: null,
     targetMs: null,
@@ -526,10 +541,9 @@ const GAME_VERSION = "v12";
     times: [],
     resultsRevealed: false,
     matchRound: 1,
-    scores: [] // scores[playerIndex] = points — indexed by position, not name, so duplicate names don't collide
+    scores: []
   };
 
-  // ---- Audio Synthesizer (Web Audio API) ----
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   let ctx = null;
 
@@ -642,10 +656,30 @@ const GAME_VERSION = "v12";
     }
   }
 
-  // ---- Actions ----
   function goStart(){ playSFX('click'); state.screen='start'; render(); }
   function toggleHelp(show){ playSFX('click'); state.showHelp = show; render(); }
   function toggleAccounts(show){ playSFX('click'); state.showAccounts = show; render(); }
+
+  function signInWithGoogle(){
+    if(!fbReady){ render(); return; }
+    playSFX('click');
+    const provider = new firebase.auth.GoogleAuthProvider();
+    fbAuth.signInWithPopup(provider).then(result => {
+      const u = result.user;
+      state.currentUser = { uid: u.uid, name: u.displayName || 'Player', photoURL: u.photoURL || '' };
+      render();
+    }).catch(err => {
+      console.warn('Sign-in failed:', err);
+      alert('Sign-in failed: ' + err.message);
+    });
+  }
+  function signOut(){
+    playSFX('click');
+    if(fbReady) fbAuth.signOut();
+    state.currentUser = null;
+    leaveOnlineRoom();
+    render();
+  }
   function loadSoundPref(){
     try {
       const saved = localStorage.getItem('ti_sound');
@@ -757,7 +791,6 @@ const GAME_VERSION = "v12";
     playSFX('reveal');
     state.resultsRevealed = true;
 
-    // Calculate closest player to target among regular players
     let bestDiff = Infinity;
     let winnerIdx = null;
 
@@ -784,7 +817,215 @@ const GAME_VERSION = "v12";
     beginReveal();
   }
 
-  // ---- Renderers ----
+  function genRoomCode(){
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for(let i=0;i<4;i++) code += chars[Math.floor(Math.random()*chars.length)];
+    return code;
+  }
+
+  function goOnlineHome(){
+    playSFX('click');
+    if(!fbReady){ state.showAccounts = true; render(); return; }
+    if(!state.currentUser){ state.showAccounts = true; render(); return; }
+    state.screen = 'onlineHome';
+    render();
+  }
+
+  function createRoom(mode, enableClues){
+    if(!fbReady || !state.currentUser) return;
+    playSFX('click');
+    const code = genRoomCode();
+    state.roomCode = code;
+    state.isHost = true;
+    fbDb.collection('rooms').doc(code).set({
+      hostUid: state.currentUser.uid,
+      status: 'waiting',
+      mode: mode || 'standard',
+      enableClues: enableClues !== false,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    }).then(() => {
+      return fbDb.collection('rooms').doc(code).collection('players').doc(state.currentUser.uid).set({
+        name: state.currentUser.name, joined: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    }).then(() => {
+      state.screen = 'onlineLobby';
+      subscribeToRoom(code);
+      render();
+    }).catch(err => alert('Could not create room: ' + err.message));
+  }
+
+  function joinRoom(code){
+    if(!fbReady || !state.currentUser) return;
+    playSFX('click');
+    code = (code || '').toUpperCase().trim();
+    if(code.length !== 4) { alert('Room codes are 4 characters.'); return; }
+    const roomRef = fbDb.collection('rooms').doc(code);
+    roomRef.get().then(doc => {
+      if(!doc.exists){ alert('No room found with that code.'); return; }
+      if(doc.data().status !== 'waiting'){ alert('That room has already started.'); return; }
+      state.roomCode = code;
+      state.isHost = false;
+      return roomRef.collection('players').doc(state.currentUser.uid).set({
+        name: state.currentUser.name, joined: firebase.firestore.FieldValue.serverTimestamp()
+      }).then(() => {
+        state.screen = 'onlineLobby';
+        subscribeToRoom(code);
+        render();
+      });
+    }).catch(err => alert('Could not join room: ' + err.message));
+  }
+
+  function subscribeToRoom(code){
+    unsubscribeOnline();
+    const roomRef = fbDb.collection('rooms').doc(code);
+
+    state.onlineUnsub = roomRef.onSnapshot(doc => {
+      if(!doc.exists) return;
+      const data = doc.data();
+      state.onlineStatus = data.status;
+      state.onlineImposterUid = data.imposterUid || null;
+      state.onlineTargetMs = data.targetMs || null;
+
+      if(data.status === 'reveal' && !state.onlineSecret){
+        fbDb.collection('rooms').doc(code).collection('secrets').doc(state.currentUser.uid).get().then(sdoc => {
+          if(sdoc.exists){ state.onlineSecret = sdoc.data(); render(); }
+        });
+      }
+      if(state.screen === 'onlineLobby' && data.status === 'reveal'){
+        state.screen = 'onlineReveal';
+      }
+      if((state.screen === 'onlineReveal' || state.screen === 'onlineWaiting') && data.status === 'revealed'){
+        state.screen = 'onlineResults';
+      }
+      render();
+    });
+
+    state.onlinePlayersUnsub = roomRef.collection('players').onSnapshot(snap => {
+      state.onlinePlayers = [];
+      snap.forEach(d => state.onlinePlayers.push({ uid: d.id, ...d.data() }));
+      render();
+    });
+  }
+
+  function unsubscribeOnline(){
+    if(state.onlineUnsub) state.onlineUnsub();
+    if(state.onlinePlayersUnsub) state.onlinePlayersUnsub();
+    state.onlineUnsub = null;
+    state.onlinePlayersUnsub = null;
+  }
+
+  function leaveOnlineRoom(){
+    unsubscribeOnline();
+    state.roomCode = null;
+    state.isHost = false;
+    state.onlinePlayers = [];
+    state.onlineStatus = null;
+    state.onlineSecret = null;
+    state.onlineImposterUid = null;
+    state.onlineTargetMs = null;
+    state.onlineRoundPhase = 'ready';
+  }
+
+  function exitOnlineToMenu(){
+    playSFX('click');
+    leaveOnlineRoom();
+    state.screen = 'start';
+    render();
+  }
+
+  function startOnlineGame(){
+    if(!state.isHost || !fbReady) return;
+    if(state.onlinePlayers.length < 3){ alert('Need at least 3 players to start.'); return; }
+    playSFX('click');
+    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+    roomRef.get().then(doc => {
+      const mode = doc.data().mode || 'standard';
+      const enableClues = doc.data().enableClues !== false;
+      let minS = 1, maxS = 9;
+      if(mode === 'fast'){ minS = 0.5; maxS = 3; }
+      if(mode === 'marathon'){ minS = 10; maxS = 20; }
+      const centi = Math.floor(Math.random() * (maxS*100 - minS*100 + 1)) + (minS*100);
+      const targetMs = centi * 10;
+      const totalSec = targetMs / 1000;
+      const lower = Math.max(0, Math.floor(totalSec - (Math.random()*1.5+0.5)));
+      const upper = Math.ceil(totalSec + (Math.random()*1.5+0.5));
+      const clue = `Target is between ${lower}s and ${upper}s`;
+
+      const imposterUid = state.onlinePlayers[Math.floor(Math.random()*state.onlinePlayers.length)].uid;
+
+      const batch = fbDb.batch();
+      state.onlinePlayers.forEach(p => {
+        const isImp = p.uid === imposterUid;
+        const secretRef = roomRef.collection('secrets').doc(p.uid);
+        batch.set(secretRef, isImp
+          ? { isImposter: true, clue: enableClues ? clue : null }
+          : { isImposter: false, targetMs: targetMs }
+        );
+        batch.update(roomRef.collection('players').doc(p.uid), { time: null, submitted: false });
+      });
+      batch.update(roomRef, { status: 'reveal' });
+      roomRef.set({ _imposterUidPending: imposterUid, _targetMsPending: targetMs }, { merge: true });
+      return batch.commit();
+    }).catch(err => alert('Could not start game: ' + err.message));
+  }
+
+  function onlineBigButtonTap(){
+    if(state.onlineRoundPhase === 'ready'){
+      playSFX('start');
+      vibrate(20);
+      state.roundStart = performance.now();
+      state.onlineRoundPhase = 'running';
+      render();
+    } else if(state.onlineRoundPhase === 'running'){
+      playSFX('stop');
+      vibrate([20,30,20]);
+      const elapsed = performance.now() - state.roundStart;
+      state.onlineRoundPhase = 'stopped';
+      fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(state.currentUser.uid)
+        .update({ time: elapsed, submitted: true });
+      render();
+    }
+  }
+
+  function goToOnlineRound(){
+    playSFX('click');
+    state.onlineRoundPhase = 'ready';
+    state.screen = 'onlineRound';
+    render();
+  }
+
+  function goToOnlineWaiting(){
+    playSFX('click');
+    state.screen = 'onlineWaiting';
+    render();
+  }
+
+  function revealOnlineResults(){
+    if(!state.isHost) return;
+    playSFX('reveal');
+    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+    roomRef.get().then(doc => {
+      const data = doc.data();
+      return roomRef.update({
+        status: 'revealed',
+        imposterUid: data._imposterUidPending,
+        targetMs: data._targetMsPending
+      });
+    });
+  }
+
+  function playAgainOnline(){
+    if(!state.isHost) return;
+    playSFX('click');
+    state.onlineSecret = null;
+    state.onlineRoundPhase = 'ready';
+    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+    roomRef.update({ status: 'waiting', imposterUid: firebase.firestore.FieldValue.delete(), targetMs: firebase.firestore.FieldValue.delete() });
+    state.screen = 'onlineLobby';
+    render();
+  }
+
   function renderHelpModal(){
     if(!state.showHelp) return '';
     return `
@@ -831,28 +1072,55 @@ const GAME_VERSION = "v12";
 
   function renderAccountsModal(){
     if(!state.showAccounts) return '';
+    if(!fbReady){
+      return `
+        <div class="modal-overlay" onclick="TI.toggleAccounts(false)">
+          <div class="modal-card" onclick="event.stopPropagation()">
+            <div class="eyebrow">Setup Needed</div>
+            <h2 class="modal-title">ONLINE NOT SET UP YET</h2>
+            <p class="help-body">Sign-in and Online Play need a free Firebase project connected first. This game works fully offline in the meantime — no account needed for pass-and-play.</p>
+            <button class="btn solid" style="margin-top:16px;" onclick="TI.toggleAccounts(false)">Got It</button>
+          </div>
+        </div>`;
+    }
+    if(state.currentUser){
+      return `
+        <div class="modal-overlay" onclick="TI.toggleAccounts(false)">
+          <div class="modal-card" onclick="event.stopPropagation()">
+            <div class="eyebrow">Account</div>
+            <h2 class="modal-title">SIGNED IN</h2>
+            <p class="help-body">Signed in as <strong>${state.currentUser.name}</strong>.</p>
+            <button class="btn danger" style="margin-top:16px;" onclick="TI.signOut()">Sign Out</button>
+            <button class="btn ghost" style="margin-top:10px;" onclick="TI.toggleAccounts(false)">Close</button>
+          </div>
+        </div>`;
+    }
     return `
       <div class="modal-overlay" onclick="TI.toggleAccounts(false)">
         <div class="modal-card" onclick="event.stopPropagation()">
-          <div class="eyebrow">Coming Soon</div>
-          <h2 class="modal-title">ONLINE ACCOUNTS</h2>
-          <p class="help-body">Sign-in and online multiplayer are in development! For now, Timer Imposter is fully offline and works great as pass-and-play — no account needed.</p>
-          <button class="btn solid" style="margin-top:16px;" onclick="TI.toggleAccounts(false)">Got It</button>
+          <div class="eyebrow">Account</div>
+          <h2 class="modal-title">SIGN IN</h2>
+          <p class="help-body">Sign in with Google to play Online Rooms with friends on separate phones.</p>
+          <button class="btn solid" style="margin-top:16px;" onclick="TI.signInWithGoogle()">🔐 Sign in with Google</button>
+          <button class="btn ghost" style="margin-top:10px;" onclick="TI.toggleAccounts(false)">Not Now</button>
         </div>
       </div>`;
   }
 
   function renderStart(){
+    const signedIn = fbReady && state.currentUser;
     return `
       <div class="screen" style="justify-content:center; align-items:flex-start;">
         <div class="eyebrow">Classified Op // Pass &amp; Play</div>
         <h1 class="title-main">TIMER<br>IMPOSTER</h1>
         <p class="sub">One phone. Everyone but one player memorizes a secret target time.<br>Blind-tap a hidden stopwatch and catch the imposter!</p>
+        ${signedIn ? `<p class="helper-note" style="margin-top:10px;">Signed in as <strong style="color:var(--green);">${state.currentUser.name}</strong></p>` : ''}
         <div class="spacer"></div>
         <div class="row-gap" style="width:100%;">
-          <button class="btn solid" onclick="TI.goSetup()">Start Game</button>
+          <button class="btn solid" onclick="TI.goSetup()">Start Game (Local)</button>
+          <button class="btn ghost" onclick="TI.goOnlineHome()">🌐 Play Online</button>
           <button class="btn ghost" onclick="TI.toggleHelp(true)">How to Play</button>
-          <button class="btn ghost" onclick="TI.toggleAccounts(true)">🔐 Sign in with Google</button>
+          <button class="btn ghost" onclick="TI.toggleAccounts(true)">${signedIn ? '👤 Account' : '🔐 Sign in with Google'}</button>
         </div>
       </div>
       ${renderHelpModal()}
@@ -1065,6 +1333,137 @@ const GAME_VERSION = "v12";
       </div>`;
   }
 
+  function renderOnlineHome(){
+    return `
+      <div class="screen">
+        <div class="eyebrow">Online // Rooms</div>
+        <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Play Online</h1>
+        <p class="sub">Everyone plays on their own phone. Create a room and share the 4-character code with friends.</p>
+        <div class="spacer"></div>
+        <div class="card">
+          <div class="role-label">Create a room</div>
+          <div class="mode-selector">
+            <button class="chip-btn" onclick="TI.createRoom('fast', true)">⚡ Fast</button>
+            <button class="chip-btn" onclick="TI.createRoom('standard', true)">🎯 Standard</button>
+            <button class="chip-btn" onclick="TI.createRoom('marathon', true)">⏱ Marathon</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="role-label">Join a room</div>
+          <input class="input-field" id="joinCodeInput" type="text" maxlength="4" placeholder="Enter 4-character code" style="text-transform:uppercase; text-align:center; font-family:'Space Mono',monospace; font-size:20px; letter-spacing:.2em;" />
+          <button class="btn solid" style="margin-top:10px;" onclick="TI.joinRoom(document.getElementById('joinCodeInput').value)">Join Room</button>
+        </div>
+        <button class="btn ghost" onclick="TI.goStart()">Back</button>
+      </div>`;
+  }
+
+  function renderOnlineLobby(){
+    const rows = state.onlinePlayers.map(p => `
+      <div class="result-row"><div class="rname">${p.name}${p.uid === state.currentUser.uid ? ' (you)' : ''}</div></div>
+    `).join('');
+    return `
+      <div class="screen">
+        <div class="eyebrow">Room Lobby</div>
+        <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Code: ${state.roomCode}</h1>
+        <p class="sub">Share this code with friends. They tap "Play Online" → "Join Room" and enter it. Need at least 3 players.</p>
+        <div class="results-list">${rows}</div>
+        <div class="spacer"></div>
+        <div class="row-gap">
+          ${state.isHost ? `<button class="btn solid" onclick="TI.startOnlineGame()">Start Game (${state.onlinePlayers.length} joined)</button>` : `<p class="helper-note">Waiting for the host to start the game...</p>`}
+          <button class="btn ghost" onclick="TI.exitOnlineToMenu()">Leave Room</button>
+        </div>
+      </div>`;
+  }
+
+  function renderOnlineReveal(){
+    if(!state.onlineSecret){
+      return `<div class="screen"><div class="handoff-wrap"><p class="helper-note">Loading your role...</p></div></div>`;
+    }
+    const isImposter = state.onlineSecret.isImposter;
+    return `
+      <div class="screen">
+        <div class="handoff-wrap">
+          <div class="eyebrow">Eyes Only</div>
+          <div class="reveal-box open">
+            <div class="bar">TAP TO DECLASSIFY</div>
+            <div class="reveal-inner">
+              ${isImposter
+                ? `<div class="role-label">Role</div><div class="imposter-text">You are<br>the Imposter</div>
+                   ${state.onlineSecret.clue ? `<div class="clue-badge">💡 Clue: ${state.onlineSecret.clue}</div>` : ''}`
+                : `<div class="role-label">Target Time</div><div class="target-time">${formatTime(state.onlineSecret.targetMs)}</div>`
+              }
+            </div>
+          </div>
+          <div style="width:100%; margin-top:22px;">
+            <button class="btn solid" onclick="TI.goToOnlineRound()">Ready — Start My Attempt</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function renderOnlineRound(){
+    let timerHtml, btnLabel, btnClass = '';
+    if(state.onlineRoundPhase === 'ready'){
+      timerHtml = `<div class="timer-display hidden-val">--:--</div>`;
+      btnLabel = 'TAP TO START';
+    } else if(state.onlineRoundPhase === 'running'){
+      timerHtml = `<div class="timer-display hidden-val">••:••</div>`;
+      btnLabel = 'TAP TO STOP';
+      btnClass = 'running';
+    } else {
+      timerHtml = `<div class="timer-display revealed">Submitted!</div>`;
+      btnLabel = 'DONE';
+    }
+    return `
+      <div class="screen">
+        <div class="round-wrap">
+          <div class="round-progress">YOUR ATTEMPT</div>
+          ${timerHtml}
+          <button class="big-btn ${btnClass}" ${state.onlineRoundPhase==='stopped'?'disabled':''} onclick="TI.onlineBigButtonTap()">${btnLabel}</button>
+          ${state.onlineRoundPhase === 'stopped' ? `<button class="btn solid" style="max-width:280px;" onclick="TI.goToOnlineWaiting()">Continue</button>` : `<p class="helper-note">Tap once to start, tap again to stop. The clock is hidden while running.</p>`}
+        </div>
+      </div>`;
+  }
+
+  function renderOnlineWaiting(){
+    const total = state.onlinePlayers.length;
+    const done = state.onlinePlayers.filter(p => p.submitted).length;
+    const rows = state.onlinePlayers.map(p => `
+      <div class="result-row"><div class="rname">${p.name}</div><div class="rtag" style="color:${p.submitted ? 'var(--green)' : 'var(--muted)'};">${p.submitted ? 'DONE' : 'WAITING'}</div></div>
+    `).join('');
+    return `
+      <div class="screen">
+        <div class="eyebrow">Waiting Room</div>
+        <h1 style="font-size:clamp(26px,7vw,30px); margin-top:6px;">${done} / ${total} finished</h1>
+        <div class="results-list">${rows}</div>
+        <div class="spacer"></div>
+        ${state.isHost ? `<button class="btn danger" ${done<total?'disabled':''} onclick="TI.revealOnlineResults()">Reveal Results</button>` : `<p class="helper-note">Waiting for the host to reveal results once everyone's done.</p>`}
+      </div>`;
+  }
+
+  function renderOnlineResults(){
+    const rows = state.onlinePlayers.map(p => {
+      const isImp = p.uid === state.onlineImposterUid;
+      return `
+        <div class="result-row ${isImp?'imposter-row':''}">
+          <div><div class="rname">${p.name}</div>${isImp ? `<span class="rtag">IMPOSTER</span>` : ''}</div>
+          <div class="rtime">${p.time != null ? formatTime(p.time) : '—'}</div>
+        </div>`;
+    }).join('');
+    return `
+      <div class="screen">
+        <div class="eyebrow">Results</div>
+        <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Round Over</h1>
+        <div class="target-banner"><div class="role-label">Target Time Was</div><div class="tval">${formatTime(state.onlineTargetMs)}</div></div>
+        <div class="results-list">${rows}</div>
+        <div class="spacer"></div>
+        <div class="row-gap">
+          ${state.isHost ? `<button class="btn solid" onclick="TI.playAgainOnline()">Play Again</button>` : ''}
+          <button class="btn ghost" onclick="TI.exitOnlineToMenu()">Leave Room</button>
+        </div>
+      </div>`;
+  }
+
   function render(){
     const app = document.getElementById('app');
     let html = '';
@@ -1075,6 +1474,12 @@ const GAME_VERSION = "v12";
       case 'firstplayer': html = renderFirstPlayer(); break;
       case 'game': html = renderGame(); break;
       case 'results': html = renderResults(); break;
+      case 'onlineHome': html = renderOnlineHome(); break;
+      case 'onlineLobby': html = renderOnlineLobby(); break;
+      case 'onlineReveal': html = renderOnlineReveal(); break;
+      case 'onlineRound': html = renderOnlineRound(); break;
+      case 'onlineWaiting': html = renderOnlineWaiting(); break;
+      case 'onlineResults': html = renderOnlineResults(); break;
     }
     app.innerHTML = html;
   }
@@ -1083,7 +1488,10 @@ const GAME_VERSION = "v12";
     goStart, toggleHelp, toggleAccounts, toggleAudio, goSetup, changePlayers, updateName, setMode, toggleClues,
     beginReveal, revealHandoffTap, revealCardTap, revealNext,
     goToGame, roundHandoffTap, bigButtonTap, nextPlayerTap, skipTurn,
-    toggleReveal, nextRound
+    toggleReveal, nextRound,
+    signInWithGoogle, signOut,
+    goOnlineHome, createRoom, joinRoom, exitOnlineToMenu, startOnlineGame,
+    goToOnlineRound, onlineBigButtonTap, goToOnlineWaiting, revealOnlineResults, playAgainOnline
   };
 
   document.getElementById('versionTag').textContent = GAME_VERSION;
@@ -1093,7 +1501,6 @@ const GAME_VERSION = "v12";
   initBtn.classList.toggle('active', state.soundEnabled);
   render();
 })();
-
 </script>
 </body>
 </html>
