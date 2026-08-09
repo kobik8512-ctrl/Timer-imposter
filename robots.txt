@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://kobik8512-ctrl.github.io/Timer-imposter/sitemap.xml
