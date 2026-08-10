@@ -551,7 +551,7 @@
 <div id="chatPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v18";
+const GAME_VERSION = "v19";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -1071,10 +1071,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.roomCode = code;
     state.isHost = true;
 
-    fbDb.collection('rooms').where('hostUid', '==', state.currentUser.uid).where('status', '==', 'waiting').get()
+    fbDb.collection('rooms').where('hostUid', '==', state.currentUser.uid).get()
       .then(snap => {
         const batch = fbDb.batch();
-        snap.forEach(doc => batch.delete(doc.ref));
+        snap.forEach(doc => { if(doc.data().status === 'waiting') batch.delete(doc.ref); });
         return snap.empty ? Promise.resolve() : batch.commit();
       })
       .then(() => fbDb.collection('rooms').doc(code).set({
@@ -1097,7 +1097,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.screen = 'onlineLobby';
       subscribeToRoom(code);
       render();
-    }).catch(err => { state.onlineError = 'Could not create room: ' + err.message; render(); }));
+    }))
+    .catch(err => { state.onlineError = 'Could not create room: ' + err.message; render(); });
   }
 
   function joinPublicRoom(code){
@@ -1236,7 +1237,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         state.chatMessages = [];
         snap.forEach(d => state.chatMessages.push(d.data()));
         renderChatPanelDOM();
-      }, err => console.warn('Chat sync error:', err));
+      }, err => { console.warn('Chat sync error:', err); state.onlineError = 'Chat error: ' + err.message; render(); });
   }
   function unsubscribeChat(){
     if(state.chatUnsub) state.chatUnsub();
@@ -1304,6 +1305,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.onlineVotedFor = null;
     state.showChat = false;
     state.chatMessages = [];
+    renderChatPanelDOM();
   }
 
   function exitOnlineToMenu(){
