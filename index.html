@@ -551,7 +551,7 @@
 <div id="chatPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v19";
+const GAME_VERSION = "v20";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -588,6 +588,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     onlineTurnSecondsLeft: null,
     onlineLastTimerIndex: -1,
     showChat: false,
+    showCloseRoomConfirm: false,
     chatMessages: [],
     chatUnsub: null,
     chatInput: '',
@@ -1315,6 +1316,41 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     render();
   }
 
+  function toggleCloseRoomConfirm(show){
+    playSFX('click');
+    state.showCloseRoomConfirm = show;
+    render();
+  }
+
+  function confirmCloseRoom(){
+    if(!state.isHost || !fbReady || !state.roomCode) return;
+    playSFX('click');
+    const code = state.roomCode;
+    const roomRef = fbDb.collection('rooms').doc(code);
+
+    Promise.all([
+      roomRef.collection('players').get(),
+      roomRef.collection('secrets').get(),
+      roomRef.collection('messages').get()
+    ]).then(([playersSnap, secretsSnap, messagesSnap]) => {
+      const batch = fbDb.batch();
+      playersSnap.forEach(d => batch.delete(d.ref));
+      secretsSnap.forEach(d => batch.delete(d.ref));
+      messagesSnap.forEach(d => batch.delete(d.ref));
+      batch.delete(roomRef);
+      return batch.commit();
+    }).then(() => {
+      state.showCloseRoomConfirm = false;
+      leaveOnlineRoom();
+      state.screen = 'start';
+      render();
+    }).catch(err => {
+      state.onlineError = 'Could not close room: ' + err.message;
+      state.showCloseRoomConfirm = false;
+      render();
+    });
+  }
+
   function startOnlineGame(){
     if(!state.isHost || !fbReady) return;
     if(state.onlinePlayers.length < 3){ state.onlineError = 'Need at least 3 players to start.'; render(); return; }
@@ -1911,6 +1947,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       </div>`;
   }
 
+  function renderCloseRoomModal(){
+    if(!state.showCloseRoomConfirm) return '';
+    return `
+      <div class="modal-overlay" onclick="TI.toggleCloseRoomConfirm(false)">
+        <div class="modal-card" onclick="event.stopPropagation()">
+          <div class="eyebrow">Close Room</div>
+          <h2 class="modal-title">CLOSE THIS ROOM?</h2>
+          <p class="help-body">This removes the room for everyone in it and can't be undone. Only the host can do this.</p>
+          <button class="btn danger" style="margin-top:16px;" onclick="TI.confirmCloseRoom()">Yes, Close Room</button>
+          <button class="btn ghost" style="margin-top:10px;" onclick="TI.toggleCloseRoomConfirm(false)">Cancel</button>
+        </div>
+      </div>`;
+  }
+
   function renderOnlineLobby(){
     const boxes = state.onlinePlayers.map(p => `
       <div style="display:flex; flex-direction:column; align-items:center; gap:6px; width:80px;">
@@ -1920,7 +1970,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     `).join('');
     return `
       <div class="screen">
-        <div class="eyebrow">Room Lobby // Max: ${state.onlineMaxPlayers} Players</div>
+        <div class="eyebrow" style="display:flex; justify-content:space-between; align-items:center;">
+          <span>Room Lobby // Max: ${state.onlineMaxPlayers} Players</span>
+          ${state.isHost ? `<button onclick="TI.toggleCloseRoomConfirm(true)" style="background:transparent; border:1px solid var(--red); color:var(--red); border-radius:50%; width:26px; height:26px; font-size:14px; cursor:pointer; flex:none;">✕</button>` : ''}
+        </div>
         <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Code: ${state.roomCode}</h1>
         <p class="sub">Waiting for players to join. Need at least 3 players.</p>
         <div style="display:flex; flex-wrap:wrap; gap:14px; padding:14px 0;">${boxes}</div>
@@ -1929,7 +1982,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           ${state.isHost ? `<button class="btn solid" onclick="TI.startOnlineGame()">Start Game (${state.onlinePlayers.length} joined)</button>` : `<p class="helper-note">Waiting for the host to start the game...</p>`}
           <button class="btn ghost" onclick="TI.exitOnlineToMenu()">Leave Room</button>
         </div>
-      </div>`;
+      </div>
+      ${renderCloseRoomModal()}`;
   }
 
   function renderOnlineReveal(){
@@ -2136,7 +2190,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     signInWithGoogle, signOut,
     goOnlineHome, goOnlineCreate, updateCreateField, changeCreateMax, submitCreateRoom,
     joinPublicRoom, goOnlineJoinPrivate, updateJoinField, submitJoinPrivate,
-    exitOnlineToMenu, startOnlineGame,
+    exitOnlineToMenu, startOnlineGame, toggleCloseRoomConfirm, confirmCloseRoom,
     goToOnlineRound, onlineBigButtonTap, onlineSkipTurn, goToOnlineWaiting, startOnlineVoting, castOnlineVote, playAgainOnline,
     toggleChat, updateChatInput, sendChatMessage
   };
