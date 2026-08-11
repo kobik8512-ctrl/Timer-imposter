@@ -547,10 +547,12 @@
 <body>
 <div id="app"></div>
 <button class="audio-btn active" id="audioToggle" onclick="TI.toggleAudio()">🔊</button>
+<button class="audio-btn" id="adminToggleBtn" style="right:56px; display:none; border-color:var(--amber); color:var(--amber);" onclick="TI.toggleAdmin(true)">⚔</button>
 <div class="corner-credit">made by kobi</div>
 <div class="corner-version" id="versionTag"></div>
 <button class="chat-btn" id="chatToggleBtn" onclick="TI.toggleChat(true)">💬</button>
 <div id="chatPanelRoot"></div>
+<div id="adminPanelRoot"></div>
 
 <script>
 const GAME_VERSION = "v26";
@@ -633,7 +635,16 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     practiceStart: null,
     practiceElapsed: null,
     lastScreen: null,
-    authSettled: false
+    authSettled: false,
+    editName: '',
+    editUsername: '',
+    profileError: null,
+    showAdmin: false,
+    adminCmd: '',
+    adminTarget: '',
+    adminError: null,
+    adminSuccess: null,
+    isMuted: false
   };
 
   try {
@@ -655,6 +666,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             isOwner: (user.email || '').toLowerCase() === OWNER_EMAIL
           };
           loadSavedProfile();
+          ensureUserDoc().catch(() => {});
         } else {
           state.currentUser = null;
         }
@@ -901,45 +913,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     render();
   }
 
-  function saveProfile(){
-    if(!state.currentUser) return;
-    playSFX('click');
-    const nameInput = document.getElementById('profileNameInput');
-    const photoInput = document.getElementById('profilePhotoInput');
-    let newName = (nameInput ? nameInput.value : '').trim().slice(0, 20);
-    if(!newName) newName = 'Player';
-    let newPhoto = (photoInput ? photoInput.value : '').trim();
-    // basic safety: only allow http(s) image-looking urls or empty
-    if(newPhoto && !/^https?:\/\/.+/i.test(newPhoto)){
-      state.onlineError = 'Photo URL must start with http:// or https://';
-      // show error inside modal by re-render after a moment - use alert style via onlineError on start
-      render();
-      return;
-    }
-
-    state.currentUser.name = newName;
-    state.currentUser.photoURL = newPhoto || state.currentUser.photoURL || '';
-
-    try {
-      localStorage.setItem('ti_profile', JSON.stringify({
-        name: state.currentUser.name,
-        photoURL: state.currentUser.photoURL
-      }));
-    } catch(e){}
-
-    // If currently in a room, update the player document so others see the change
-    if(fbReady && state.roomCode){
-      fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(state.currentUser.uid).update({
-        name: state.currentUser.name,
-        photoURL: state.currentUser.photoURL || '',
-        isOwner: !!state.currentUser.isOwner
-      }).catch(() => {});
-    }
-
-    state.showAccounts = false;
-    render();
-  }
-
   function loadSavedProfile(){
     try {
       const raw = localStorage.getItem('ti_profile');
@@ -950,6 +923,157 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         if(data.photoURL !== undefined) state.currentUser.photoURL = data.photoURL || '';
       }
     } catch(e){}
+  }
+
+  function validateName(name){
+    // Letters, numbers, underscores only (Roblox/Discord style)
+    return /^[A-Za-z0-9_]{3,20}$/.test(name);
+  }
+
+  function validateUsername(username){
+    return /^[A-Za-z0-9_]{3,20}$/.test(username);
+  }
+
+  function daysLeft(ts){
+    if(!ts) return 0;
+    const ms = 7 * 24 * 60 * 60 * 1000;
+    const left = (ts + ms) - Date.now();
+    return left > 0 ? Math.ceil(left / (24 * 60 * 60 * 1000)) : 0;
+  }
+
+  async function ensureUserDoc(){
+    if(!fbReady || !state.currentUser) return null;
+    const uref = fbDb.collection('users').doc(state.currentUser.uid);
+    const snap = await uref.get();
+    if(!snap.exists){
+      await uref.set({
+        name: state.currentUser.name,
+        username: null,
+        email: state.currentUser.email || null,
+        isOwner: !!state.currentUser.isOwner,
+        nameChangedAt: null,
+        usernameChangedAt: null,
+        mutedUntil: null,
+        banned: false,
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      return { name: state.currentUser.name, username: null, nameChangedAt: null, usernameChangedAt: null, mutedUntil: null, banned: false };
+    }
+    const data = snap.data();
+    if(data.banned){
+      await fbAuth.signOut();
+      state.currentUser = null;
+      state.onlineError = 'You are banned from Timer Imposter.';
+      state.screen = 'start';
+      render();
+      return null;
+    }
+    if(data.name) state.currentUser.name = data.name;
+    if(data.username) state.currentUser.username = data.username;
+    state.currentUser.mutedUntil = data.mutedUntil || null;
+    state.isMuted = data.mutedUntil && data.mutedUntil > Date.now();
+    return data;
+  }
+
+  function saveProfile(){
+    if(!state.currentUser || !fbReady) return;
+    playSFX('click');
+    const nameInput = document.getElementById('profileNameInput');
+    const usernameInput = document.getElementById('profileUsernameInput');
+    const photoInput = document.getElementById('profilePhotoInput');
+    let newName = (nameInput ? nameInput.value : '').trim();
+    let newUsername = (usernameInput ? usernameInput.value : '').trim().toLowerCase();
+    let newPhoto = (photoInput ? photoInput.value : '').trim();
+
+    state.profileError = null;
+
+    if(newName && !validateName(newName)){
+      state.profileError = 'Name: 3-20 chars, letters, numbers, underscores only.';
+      render();
+      return;
+    }
+    if(newUsername && !validateUsername(newUsername)){
+      state.profileError = 'Username: 3-20 chars, letters, numbers, underscores only.';
+      render();
+      return;
+    }
+    if(newPhoto && !/^https?:\/\/.+/i.test(newPhoto)){
+      state.profileError = 'Photo URL must start with http:// or https://';
+      render();
+      return;
+    }
+
+    ensureUserDoc().then(async (udata) => {
+      if(!udata) return;
+      const updates = {};
+      const nameCooldown = daysLeft(udata.nameChangedAt);
+      const userCooldown = daysLeft(udata.usernameChangedAt);
+
+      if(newName && newName !== (udata.name || state.currentUser.name)){
+        if(nameCooldown > 0){
+          state.profileError = `You can change your name again in ${nameCooldown} day(s).`;
+          render();
+          return;
+        }
+        updates.name = newName;
+        updates.nameChangedAt = Date.now();
+      }
+
+      if(newUsername && newUsername !== (udata.username || '')){
+        if(userCooldown > 0){
+          state.profileError = `You can change your username again in ${userCooldown} day(s).`;
+          render();
+          return;
+        }
+        // Unique username check
+        const unameRef = fbDb.collection('usernames').doc(newUsername);
+        const taken = await unameRef.get();
+        if(taken.exists && taken.data().uid !== state.currentUser.uid){
+          state.profileError = 'That username is already taken.';
+          render();
+          return;
+        }
+        // Free old username
+        if(udata.username){
+          await fbDb.collection('usernames').doc(udata.username).delete().catch(()=>{});
+        }
+        await unameRef.set({ uid: state.currentUser.uid, claimedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        updates.username = newUsername;
+        updates.usernameChangedAt = Date.now();
+      }
+
+      if(newPhoto !== undefined){
+        updates.photoURL = newPhoto || null;
+      }
+
+      if(Object.keys(updates).length === 0){
+        state.profileError = 'No changes to save.';
+        render();
+        return;
+      }
+
+      await fbDb.collection('users').doc(state.currentUser.uid).set(updates, { merge: true });
+      if(updates.name) state.currentUser.name = updates.name;
+      if(updates.username) state.currentUser.username = updates.username;
+      if(updates.photoURL !== undefined) state.currentUser.photoURL = updates.photoURL || '';
+
+      if(state.roomCode){
+        const pUpdates = {};
+        if(updates.name) pUpdates.name = updates.name;
+        if(updates.photoURL !== undefined) pUpdates.photoURL = updates.photoURL || '';
+        if(updates.username) pUpdates.username = updates.username;
+        if(Object.keys(pUpdates).length){
+          await fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(state.currentUser.uid).update(pUpdates);
+        }
+      }
+
+      state.profileError = null;
+      state.showAccounts = false;
+      render();
+    }).catch(err => {
+      state.profileError = err.message || 'Could not save profile.';
+      render();
+    });
   }
 
   function loadSoundPref(){
@@ -1407,6 +1531,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function sendChatMessage(){
     const text = (state.chatInput || '').trim();
     if(!text || !state.roomCode || !state.currentUser) return;
+    if(state.isMuted || (state.currentUser.mutedUntil && state.currentUser.mutedUntil > Date.now())){
+      state.onlineError = 'You are muted and cannot chat.';
+      render();
+      return;
+    }
     state.chatInput = '';
     fbDb.collection('rooms').doc(state.roomCode).collection('messages').add({
       uid: state.currentUser.uid,
@@ -1415,6 +1544,136 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
     renderChatPanelDOM();
+  }
+
+  function toggleAdmin(show){
+    if(!state.currentUser || !state.currentUser.isOwner) return;
+    playSFX('click');
+    state.showAdmin = !!show;
+    state.adminError = null;
+    state.adminSuccess = null;
+    renderAdminPanelDOM();
+  }
+
+  function updateAdminField(field, val){
+    if(field === 'cmd') state.adminCmd = val;
+    if(field === 'target') state.adminTarget = val;
+  }
+
+  async function runAdminCommand(){
+    if(!state.currentUser || !state.currentUser.isOwner || !fbReady) return;
+    playSFX('click');
+    state.adminError = null;
+    state.adminSuccess = null;
+    const cmd = (state.adminCmd || '').trim().toLowerCase();
+    const target = (state.adminTarget || '').trim();
+    if(!cmd || !target){
+      state.adminError = 'Enter a command and target (username or name).';
+      renderAdminPanelDOM();
+      return;
+    }
+
+    // Resolve target by username first, then by display name among online players / users collection
+    let targetUid = null;
+    let targetName = target;
+
+    const unameSnap = await fbDb.collection('usernames').doc(target.toLowerCase()).get();
+    if(unameSnap.exists){
+      targetUid = unameSnap.data().uid;
+    } else {
+      const onlineMatch = state.onlinePlayers.find(p =>
+        (p.username && p.username.toLowerCase() === target.toLowerCase()) ||
+        (p.name && p.name.toLowerCase() === target.toLowerCase())
+      );
+      if(onlineMatch) targetUid = onlineMatch.uid;
+    }
+
+    if(!targetUid){
+      // search users by name
+      const q = await fbDb.collection('users').where('name', '==', target).limit(1).get();
+      if(!q.empty) targetUid = q.docs[0].id;
+    }
+
+    if(!targetUid){
+      state.adminError = 'User not found. Use their username or exact display name.';
+      renderAdminPanelDOM();
+      return;
+    }
+
+    if(targetUid === state.currentUser.uid){
+      state.adminError = 'You cannot target yourself.';
+      renderAdminPanelDOM();
+      return;
+    }
+
+    try {
+      if(cmd === 'ban'){
+        await fbDb.collection('users').doc(targetUid).set({ banned: true, bannedAt: Date.now(), bannedBy: state.currentUser.uid }, { merge: true });
+        if(state.roomCode){
+          await fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(targetUid).delete().catch(()=>{});
+        }
+        state.adminSuccess = 'Banned user permanently from the site.';
+      } else if(cmd === 'kick'){
+        if(!state.roomCode){
+          state.adminError = 'Join a room first to kick someone from it.';
+          renderAdminPanelDOM();
+          return;
+        }
+        const t = state.onlinePlayers.find(p => p.uid === targetUid);
+        targetName = t ? t.name : target;
+        await fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(targetUid).delete();
+        await fbDb.collection('rooms').doc(state.roomCode).collection('messages').add({
+          uid: 'system', name: 'System', text: targetName + ' was kicked by admin',
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        state.adminSuccess = 'Kicked from current room.';
+      } else if(cmd === 'mute'){
+        const mutedUntil = Date.now() + (7 * 24 * 60 * 60 * 1000);
+        await fbDb.collection('users').doc(targetUid).set({ mutedUntil: mutedUntil, mutedBy: state.currentUser.uid }, { merge: true });
+        state.adminSuccess = 'Muted for 7 days (chat blocked).';
+      } else {
+        state.adminError = 'Unknown command. Use: ban, kick, mute';
+        renderAdminPanelDOM();
+        return;
+      }
+      renderAdminPanelDOM();
+    } catch(err){
+      state.adminError = err.message || 'Command failed.';
+      renderAdminPanelDOM();
+    }
+  }
+
+  function renderAdminPanelDOM(){
+    const root = document.getElementById('adminPanelRoot');
+    const btn = document.getElementById('adminToggleBtn');
+    if(btn){
+      btn.style.display = (state.currentUser && state.currentUser.isOwner) ? 'flex' : 'none';
+    }
+    if(!root) return;
+    if(!state.showAdmin || !state.currentUser || !state.currentUser.isOwner){
+      root.innerHTML = '';
+      return;
+    }
+    root.innerHTML = `
+      <div class="modal-overlay" onclick="TI.toggleAdmin(false)">
+        <div class="modal-card" onclick="event.stopPropagation()">
+          <div class="eyebrow">Admin // Owner Only</div>
+          <h2 class="modal-title">COMMANDS</h2>
+          <p class="help-body" style="margin-bottom:12px;">
+            <strong>ban</strong> — ban from whole site<br>
+            <strong>kick</strong> — kick from current room (works even if not room host)<br>
+            <strong>mute</strong> — mute chat for 7 days
+          </p>
+          <div class="role-label">Command</div>
+          <input class="input-field" type="text" value="${state.adminCmd || ''}" placeholder="ban / kick / mute" onchange="TI.updateAdminField('cmd', this.value)" />
+          <div class="role-label" style="margin-top:12px;">Target (username or display name)</div>
+          <input class="input-field" type="text" value="${state.adminTarget || ''}" placeholder="target_user" onchange="TI.updateAdminField('target', this.value)" />
+          ${state.adminError ? `<div class="error-banner" style="margin-top:12px;">${state.adminError}</div>` : ''}
+          ${state.adminSuccess ? `<div style="margin-top:12px; padding:10px; border:1px solid var(--green); color:var(--green); border-radius:8px;">${state.adminSuccess}</div>` : ''}
+          <button class="btn solid" style="margin-top:16px;" onclick="TI.runAdminCommand()">Run Command</button>
+          <button class="btn ghost" style="margin-top:10px;" onclick="TI.toggleAdmin(false)">Close</button>
+        </div>
+      </div>`;
   }
   function renderChatPanelDOM(){
     const root = document.getElementById('chatPanelRoot');
@@ -1930,11 +2189,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             <p class="help-body" style="text-align:center; margin-bottom:14px;">
               ${state.currentUser.isOwner ? '<span style="color:var(--amber);">[Owner] ' + state.currentUser.name + '</span>' : state.currentUser.name}
             </p>
-            <div class="role-label">Display Name</div>
-            <input class="input-field" type="text" id="profileNameInput" value="${(state.currentUser.name || '').replace(/"/g,'&quot;')}" maxlength="20" placeholder="Your name" />
+            <div class="role-label">Display Name (letters, numbers, _ )</div>
+            <input class="input-field" type="text" id="profileNameInput" value="${(state.currentUser.name || '').replace(/"/g,'&quot;')}" maxlength="20" placeholder="Display_Name" />
+            <div class="role-label" style="margin-top:12px;">Username (unique, letters, numbers, _ )</div>
+            <input class="input-field" type="text" id="profileUsernameInput" value="${(state.currentUser.username || '').replace(/"/g,'&quot;')}" maxlength="20" placeholder="username" />
             <div class="role-label" style="margin-top:12px;">Profile Picture URL (optional)</div>
             <input class="input-field" type="text" id="profilePhotoInput" value="${(state.currentUser.photoURL || '').replace(/"/g,'&quot;')}" placeholder="https://example.com/photo.jpg" />
-            <p class="helper-note" style="margin-top:6px;">Paste any image link, or leave blank to use your Google photo.</p>
+            <p class="helper-note" style="margin-top:6px;">Name &amp; username can each be changed once every 7 days. Letters, numbers, underscores only.</p>
+            ${state.profileError ? `<div class="error-banner">${state.profileError}</div>` : ''}
             <button class="btn solid" style="margin-top:16px;" onclick="TI.saveProfile()">Save Profile</button>
             <button class="btn danger" style="margin-top:10px;" onclick="TI.signOut()">Sign Out</button>
             <button class="btn ghost" style="margin-top:10px;" onclick="TI.toggleAccounts(false)">Close</button>
@@ -2593,6 +2855,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     app.innerHTML = html;
     const chatBtn = document.getElementById('chatToggleBtn');
     if(chatBtn) chatBtn.style.display = state.roomCode ? 'flex' : 'none';
+    const adminBtn = document.getElementById('adminToggleBtn');
+    if(adminBtn) adminBtn.style.display = (state.currentUser && state.currentUser.isOwner) ? 'flex' : 'none';
+    if(state.showAdmin) renderAdminPanelDOM();
   }
 
   window.TI = {
@@ -2607,7 +2872,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     exitOnlineToMenu, startOnlineGame, toggleCloseRoomConfirm, confirmCloseRoom,
     toggleDeleteRoomConfirm, confirmDeleteRoom, kickPlayer,
     goToOnlineRound, onlineBigButtonTap, onlineSkipTurn, goToOnlineWaiting, startOnlineVoting, castOnlineVote, playAgainOnline,
-    toggleChat, updateChatInput, sendChatMessage
+    toggleChat, updateChatInput, sendChatMessage,
+    toggleAdmin, updateAdminField, runAdminCommand
   };
 
   document.getElementById('versionTag').textContent = GAME_VERSION;
