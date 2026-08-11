@@ -70,6 +70,8 @@
     flex:1;
     display:flex;
     flex-direction:column;
+  }
+  .screen.anim{
     animation: fadein .35s ease both;
   }
   @keyframes fadein{ from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:translateY(0);} }
@@ -551,7 +553,7 @@
 <div id="chatPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v20";
+const GAME_VERSION = "v22";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -589,6 +591,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     onlineLastTimerIndex: -1,
     showChat: false,
     showCloseRoomConfirm: false,
+    showDeleteRoomConfirm: false,
+    pendingDeleteCode: null,
     chatMessages: [],
     chatUnsub: null,
     chatInput: '',
@@ -623,7 +627,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     scores: [],
     practicePhase: 'ready', // 'ready' | 'running' | 'stopped'
     practiceStart: null,
-    practiceElapsed: null
+    practiceElapsed: null,
+    lastScreen: null,
+    authSettled: false
   };
 
   try {
@@ -641,6 +647,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         } else {
           state.currentUser = null;
         }
+        state.authSettled = true;
         render();
       });
 
@@ -648,11 +655,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         if (result && result.user) {
           const u = result.user;
           state.currentUser = { uid: u.uid, name: u.displayName || 'Player', photoURL: u.photoURL || '' };
+          state.authSettled = true;
           render();
         }
       }).catch(err => console.warn('Redirect auth result error:', err));
+    } else {
+      state.authSettled = true;
     }
-  } catch(e){ console.warn('Firebase init failed:', e); }
+  } catch(e){ console.warn('Firebase init failed:', e); state.authSettled = true; }
 
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   let ctx = null;
@@ -1351,6 +1361,69 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     });
   }
 
+  function toggleDeleteRoomConfirm(code){
+    playSFX('click');
+    if(code){
+      state.pendingDeleteCode = code;
+      state.showDeleteRoomConfirm = true;
+    } else {
+      state.pendingDeleteCode = null;
+      state.showDeleteRoomConfirm = false;
+    }
+    render();
+  }
+
+  function confirmDeleteRoom(){
+    if(!fbReady || !state.currentUser || !state.pendingDeleteCode) return;
+    playSFX('click');
+    const code = state.pendingDeleteCode;
+    const roomRef = fbDb.collection('rooms').doc(code);
+
+    roomRef.get().then(doc => {
+      if(!doc.exists){
+        state.showDeleteRoomConfirm = false;
+        state.pendingDeleteCode = null;
+        state.onlineError = 'Room no longer exists.';
+        render();
+        return;
+      }
+      if(doc.data().hostUid !== state.currentUser.uid){
+        state.showDeleteRoomConfirm = false;
+        state.pendingDeleteCode = null;
+        state.onlineError = 'You can only delete your own rooms.';
+        render();
+        return;
+      }
+
+      return Promise.all([
+        roomRef.collection('players').get(),
+        roomRef.collection('secrets').get(),
+        roomRef.collection('messages').get()
+      ]).then(([playersSnap, secretsSnap, messagesSnap]) => {
+        const batch = fbDb.batch();
+        playersSnap.forEach(d => batch.delete(d.ref));
+        secretsSnap.forEach(d => batch.delete(d.ref));
+        messagesSnap.forEach(d => batch.delete(d.ref));
+        batch.delete(roomRef);
+        return batch.commit();
+      }).then(() => {
+        state.showDeleteRoomConfirm = false;
+        state.pendingDeleteCode = null;
+        state.onlineError = null;
+        if(state.roomCode === code){
+          leaveOnlineRoom();
+          state.screen = 'onlineHome';
+        }
+        render();
+      });
+    }).catch(err => {
+      state.onlineError = 'Could not delete room: ' + err.message;
+      state.showDeleteRoomConfirm = false;
+      state.pendingDeleteCode = null;
+      render();
+    });
+  }
+
   function startOnlineGame(){
     if(!state.isHost || !fbReady) return;
     if(state.onlinePlayers.length < 3){ state.onlineError = 'Need at least 3 players to start.'; render(); return; }
@@ -1857,15 +1930,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   function renderOnlineHome(){
-    const publicList = state.publicRooms.length > 0 ? state.publicRooms.map(r => `
+    const publicList = state.publicRooms.length > 0 ? state.publicRooms.map(r => {
+      const isMine = state.currentUser && r.hostUid === state.currentUser.uid;
+      return `
       <div class="result-row">
         <div>
           <div class="rname">${r.roomName || 'Public Room'}</div>
-          <span style="font-size:12px; color:var(--muted);">${r.mode.toUpperCase()} • Max: ${r.maxPlayers || 10}</span>
+          <span style="font-size:12px; color:var(--muted);">${(r.mode || 'standard').toUpperCase()} • Max: ${r.maxPlayers || 10}</span>
         </div>
-        <button class="chip-btn active" style="flex:none; padding:6px 12px;" onclick="TI.joinPublicRoom('${r.code}')">Join</button>
-      </div>
-    `).join('') : `<p class="helper-note" style="text-align:center; padding:12px;">No active public rooms right now.</p>`;
+        <div style="display:flex; gap:6px; align-items:center;">
+          <button class="chip-btn active" style="flex:none; padding:6px 12px;" onclick="TI.joinPublicRoom('${r.code}')">Join</button>
+          ${isMine ? `<button onclick="TI.toggleDeleteRoomConfirm('${r.code}')" style="background:transparent; border:1px solid var(--red); color:var(--red); border-radius:50%; width:28px; height:28px; font-size:14px; cursor:pointer; flex:none; display:flex; align-items:center; justify-content:center;">✕</button>` : ''}
+        </div>
+      </div>`;
+    }).join('') : `<p class="helper-note" style="text-align:center; padding:12px;">No active public rooms right now.</p>`;
 
     return `
       <div class="screen">
@@ -1896,7 +1974,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
         <div class="spacer"></div>
         <button class="btn ghost" onclick="TI.goStart()">Back</button>
-      </div>`;
+      </div>
+      ${renderDeleteRoomModal()}`;
   }
 
   function renderOnlineCreate(){
@@ -1957,6 +2036,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           <p class="help-body">This removes the room for everyone in it and can't be undone. Only the host can do this.</p>
           <button class="btn danger" style="margin-top:16px;" onclick="TI.confirmCloseRoom()">Yes, Close Room</button>
           <button class="btn ghost" style="margin-top:10px;" onclick="TI.toggleCloseRoomConfirm(false)">Cancel</button>
+        </div>
+      </div>`;
+  }
+
+  function renderDeleteRoomModal(){
+    if(!state.showDeleteRoomConfirm) return '';
+    return `
+      <div class="modal-overlay" onclick="TI.toggleDeleteRoomConfirm(null)">
+        <div class="modal-card" onclick="event.stopPropagation()">
+          <div class="eyebrow">Delete Room</div>
+          <h2 class="modal-title">DELETE THIS ROOM?</h2>
+          <p class="help-body">This permanently removes the room and kicks everyone in it. This can't be undone.</p>
+          <button class="btn danger" style="margin-top:16px;" onclick="TI.confirmDeleteRoom()">Yes, Delete Room</button>
+          <button class="btn ghost" style="margin-top:10px;" onclick="TI.toggleDeleteRoomConfirm(null)">Cancel</button>
         </div>
       </div>`;
   }
@@ -2176,6 +2269,18 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       case 'onlineVoting': html = renderOnlineVoting(); break;
       case 'onlineResults': html = renderOnlineResults(); break;
     }
+
+    // Only play the fade-in animation when the screen actually changes.
+    // This prevents the black flash / double-fade when Firebase auth re-renders the same screen on load.
+    const screenChanged = state.lastScreen !== state.screen;
+    state.lastScreen = state.screen;
+
+    if(html.indexOf('class="screen') !== -1){
+      if(screenChanged){
+        html = html.replace('class="screen"', 'class="screen anim"');
+      }
+    }
+
     app.innerHTML = html;
     const chatBtn = document.getElementById('chatToggleBtn');
     if(chatBtn) chatBtn.style.display = state.roomCode ? 'flex' : 'none';
@@ -2191,6 +2296,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     goOnlineHome, goOnlineCreate, updateCreateField, changeCreateMax, submitCreateRoom,
     joinPublicRoom, goOnlineJoinPrivate, updateJoinField, submitJoinPrivate,
     exitOnlineToMenu, startOnlineGame, toggleCloseRoomConfirm, confirmCloseRoom,
+    toggleDeleteRoomConfirm, confirmDeleteRoom,
     goToOnlineRound, onlineBigButtonTap, onlineSkipTurn, goToOnlineWaiting, startOnlineVoting, castOnlineVote, playAgainOnline,
     toggleChat, updateChatInput, sendChatMessage
   };
@@ -2217,8 +2323,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   const initBtn = document.getElementById('audioToggle');
   initBtn.textContent = state.soundEnabled ? '🔊' : '🔇';
   initBtn.classList.toggle('active', state.soundEnabled);
-  render();
+
+  // Avoid the load glitch: wait briefly for Firebase auth to settle before first paint.
+  // If auth never fires (or Firebase is disabled), still show the UI after a short timeout.
+  if(fbReady && !state.authSettled){
+    setTimeout(() => {
+      if(!state.authSettled){
+        state.authSettled = true;
+        render();
+      }
+    }, 400);
+  } else {
+    render();
+  }
 })();
 </script>
 </body>
-  </html>
+</html>
