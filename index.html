@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v26";
+const GAME_VERSION = "v27";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 
 const firebaseConfig = {
@@ -941,14 +941,33 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     return left > 0 ? Math.ceil(left / (24 * 60 * 60 * 1000)) : 0;
   }
 
+  function genDefaultUsername(){
+    const n = Math.floor(1000 + Math.random() * 9000);
+    return 'user' + n;
+  }
+
+  async function claimDefaultUsername(uid){
+    for(let i = 0; i < 8; i++){
+      const candidate = genDefaultUsername();
+      const ref = fbDb.collection('usernames').doc(candidate);
+      const snap = await ref.get();
+      if(!snap.exists){
+        await ref.set({ uid: uid, claimedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        return candidate;
+      }
+    }
+    return 'user' + Date.now().toString().slice(-6);
+  }
+
   async function ensureUserDoc(){
     if(!fbReady || !state.currentUser) return null;
     const uref = fbDb.collection('users').doc(state.currentUser.uid);
     const snap = await uref.get();
     if(!snap.exists){
+      let uname = await claimDefaultUsername(state.currentUser.uid);
       await uref.set({
         name: state.currentUser.name,
-        username: null,
+        username: uname,
         email: state.currentUser.email || null,
         isOwner: !!state.currentUser.isOwner,
         nameChangedAt: null,
@@ -957,7 +976,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         banned: false,
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
-      return { name: state.currentUser.name, username: null, nameChangedAt: null, usernameChangedAt: null, mutedUntil: null, banned: false };
+      state.currentUser.username = uname;
+      return { name: state.currentUser.name, username: uname, nameChangedAt: null, usernameChangedAt: null, mutedUntil: null, banned: false };
     }
     const data = snap.data();
     if(data.banned){
@@ -967,6 +987,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.screen = 'start';
       render();
       return null;
+    }
+    // Auto-assign username if missing
+    if(!data.username){
+      const uname = await claimDefaultUsername(state.currentUser.uid);
+      await uref.set({ username: uname }, { merge: true });
+      data.username = uname;
     }
     if(data.name) state.currentUser.name = data.name;
     if(data.username) state.currentUser.username = data.username;
@@ -982,20 +1008,35 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const usernameInput = document.getElementById('profileUsernameInput');
     const photoInput = document.getElementById('profilePhotoInput');
     let newName = (nameInput ? nameInput.value : '').trim();
-    let newUsername = (usernameInput ? usernameInput.value : '').trim().toLowerCase();
+    let newUsernameRaw = (usernameInput ? usernameInput.value : '').trim();
+    const isOwner = !!state.currentUser.isOwner;
+    // Owner can use any characters; others lowercase alphanumeric + underscore
+    let newUsername = isOwner ? newUsernameRaw : newUsernameRaw.toLowerCase();
     let newPhoto = (photoInput ? photoInput.value : '').trim();
 
     state.profileError = null;
 
-    if(newName && !validateName(newName)){
-      state.profileError = 'Name: 3-20 chars, letters, numbers, underscores only.';
-      render();
-      return;
+    if(newName){
+      if(isOwner){
+        if(newName.length < 1 || newName.length > 30){
+          state.profileError = 'Name: 1-30 characters.';
+          render(); return;
+        }
+      } else if(!validateName(newName)){
+        state.profileError = 'Name: 3-20 chars, letters, numbers, underscores only.';
+        render(); return;
+      }
     }
-    if(newUsername && !validateUsername(newUsername)){
-      state.profileError = 'Username: 3-20 chars, letters, numbers, underscores only.';
-      render();
-      return;
+    if(newUsername){
+      if(isOwner){
+        if(newUsername.length < 1 || newUsername.length > 30){
+          state.profileError = 'Username: 1-30 characters.';
+          render(); return;
+        }
+      } else if(!validateUsername(newUsername)){
+        state.profileError = 'Username: 3-20 chars, letters, numbers, underscores only.';
+        render(); return;
+      }
     }
     if(newPhoto && !/^https?:\/\/.+/i.test(newPhoto)){
       state.profileError = 'Photo URL must start with http:// or https://';
@@ -1003,11 +1044,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       return;
     }
 
+    if(!confirm('Are you sure you want to save these profile changes?')) return;
+
     ensureUserDoc().then(async (udata) => {
       if(!udata) return;
       const updates = {};
-      const nameCooldown = daysLeft(udata.nameChangedAt);
-      const userCooldown = daysLeft(udata.usernameChangedAt);
+      const nameCooldown = isOwner ? 0 : daysLeft(udata.nameChangedAt);
+      const userCooldown = isOwner ? 0 : daysLeft(udata.usernameChangedAt);
 
       if(newName && newName !== (udata.name || state.currentUser.name)){
         if(nameCooldown > 0){
@@ -1026,7 +1069,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           return;
         }
         // Unique username check
-        const unameRef = fbDb.collection('usernames').doc(newUsername);
+        const unameKey = newUsername.toLowerCase();
+        const unameRef = fbDb.collection('usernames').doc(unameKey);
         const taken = await unameRef.get();
         if(taken.exists && taken.data().uid !== state.currentUser.uid){
           state.profileError = 'That username is already taken.';
@@ -1035,9 +1079,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         }
         // Free old username
         if(udata.username){
-          await fbDb.collection('usernames').doc(udata.username).delete().catch(()=>{});
+          await fbDb.collection('usernames').doc(String(udata.username).toLowerCase()).delete().catch(()=>{});
         }
-        await unameRef.set({ uid: state.currentUser.uid, claimedAt: firebase.firestore.FieldValue.serverTimestamp() });
+        await unameRef.set({ uid: state.currentUser.uid, display: newUsername, claimedAt: firebase.firestore.FieldValue.serverTimestamp() });
         updates.username = newUsername;
         updates.usernameChangedAt = Date.now();
       }
@@ -1056,6 +1100,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       if(updates.name) state.currentUser.name = updates.name;
       if(updates.username) state.currentUser.username = updates.username;
       if(updates.photoURL !== undefined) state.currentUser.photoURL = updates.photoURL || '';
+
+      try {
+        localStorage.setItem('ti_profile', JSON.stringify({
+          name: state.currentUser.name,
+          photoURL: state.currentUser.photoURL || '',
+          username: state.currentUser.username || ''
+        }));
+      } catch(e){}
 
       if(state.roomCode){
         const pUpdates = {};
@@ -1613,6 +1665,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           await fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(targetUid).delete().catch(()=>{});
         }
         state.adminSuccess = 'Banned user permanently from the site.';
+      } else if(cmd === 'unban'){
+        await fbDb.collection('users').doc(targetUid).set({ banned: false, unbannedAt: Date.now(), unbannedBy: state.currentUser.uid }, { merge: true });
+        state.adminSuccess = 'User has been unbanned.';
       } else if(cmd === 'kick'){
         if(!state.roomCode){
           state.adminError = 'Join a room first to kick someone from it.';
@@ -1631,8 +1686,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         const mutedUntil = Date.now() + (7 * 24 * 60 * 60 * 1000);
         await fbDb.collection('users').doc(targetUid).set({ mutedUntil: mutedUntil, mutedBy: state.currentUser.uid }, { merge: true });
         state.adminSuccess = 'Muted for 7 days (chat blocked).';
+      } else if(cmd === 'unmute'){
+        await fbDb.collection('users').doc(targetUid).set({ mutedUntil: null, unmutedAt: Date.now(), unmutedBy: state.currentUser.uid }, { merge: true });
+        state.adminSuccess = 'User has been unmuted.';
       } else {
-        state.adminError = 'Unknown command. Use: ban, kick, mute';
+        state.adminError = 'Unknown command. Use: ban, unban, kick, mute, unmute';
         renderAdminPanelDOM();
         return;
       }
@@ -1661,11 +1719,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           <h2 class="modal-title">COMMANDS</h2>
           <p class="help-body" style="margin-bottom:12px;">
             <strong>ban</strong> — ban from whole site<br>
-            <strong>kick</strong> — kick from current room (works even if not room host)<br>
-            <strong>mute</strong> — mute chat for 7 days
+            <strong>unban</strong> — remove a ban<br>
+            <strong>kick</strong> — kick from current room<br>
+            <strong>mute</strong> — mute chat for 7 days<br>
+            <strong>unmute</strong> — remove a mute
           </p>
           <div class="role-label">Command</div>
-          <input class="input-field" type="text" value="${state.adminCmd || ''}" placeholder="ban / kick / mute" onchange="TI.updateAdminField('cmd', this.value)" />
+          <input class="input-field" type="text" value="${state.adminCmd || ''}" placeholder="ban / unban / kick / mute / unmute" onchange="TI.updateAdminField('cmd', this.value)" />
           <div class="role-label" style="margin-top:12px;">Target (username or display name)</div>
           <input class="input-field" type="text" value="${state.adminTarget || ''}" placeholder="target_user" onchange="TI.updateAdminField('target', this.value)" />
           ${state.adminError ? `<div class="error-banner" style="margin-top:12px;">${state.adminError}</div>` : ''}
@@ -2190,12 +2250,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
               ${state.currentUser.isOwner ? '<span style="color:var(--amber);">[Owner] ' + state.currentUser.name + '</span>' : state.currentUser.name}
             </p>
             <div class="role-label">Display Name (letters, numbers, _ )</div>
-            <input class="input-field" type="text" id="profileNameInput" value="${(state.currentUser.name || '').replace(/"/g,'&quot;')}" maxlength="20" placeholder="Display_Name" />
-            <div class="role-label" style="margin-top:12px;">Username (unique, letters, numbers, _ )</div>
-            <input class="input-field" type="text" id="profileUsernameInput" value="${(state.currentUser.username || '').replace(/"/g,'&quot;')}" maxlength="20" placeholder="username" />
+            <input class="input-field" type="text" id="profileNameInput" value="${(state.currentUser.name || '').replace(/"/g,'&quot;')}" maxlength="30" placeholder="Display_Name" />
+            <div class="role-label" style="margin-top:12px;">Username (unique)</div>
+            <input class="input-field" type="text" id="profileUsernameInput" value="${(state.currentUser.username || '').replace(/"/g,'&quot;')}" maxlength="30" placeholder="user1234" />
             <div class="role-label" style="margin-top:12px;">Profile Picture URL (optional)</div>
             <input class="input-field" type="text" id="profilePhotoInput" value="${(state.currentUser.photoURL || '').replace(/"/g,'&quot;')}" placeholder="https://example.com/photo.jpg" />
-            <p class="helper-note" style="margin-top:6px;">Name &amp; username can each be changed once every 7 days. Letters, numbers, underscores only.</p>
+            <p class="helper-note" style="margin-top:6px;">${state.currentUser.isOwner ? 'Owner: no cooldown, any characters allowed in username.' : 'Name &amp; username can each be changed once every 7 days. Letters, numbers, underscores only.'}</p>
             ${state.profileError ? `<div class="error-banner">${state.profileError}</div>` : ''}
             <button class="btn solid" style="margin-top:16px;" onclick="TI.saveProfile()">Save Profile</button>
             <button class="btn danger" style="margin-top:10px;" onclick="TI.signOut()">Sign Out</button>
