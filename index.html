@@ -553,7 +553,7 @@
 <div id="chatPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v22";
+const GAME_VERSION = "v23";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -1222,6 +1222,18 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.onlinePlayersUnsub = roomRef.collection('players').onSnapshot(snap => {
       state.onlinePlayers = [];
       snap.forEach(d => state.onlinePlayers.push({ uid: d.id, ...d.data() }));
+
+      // If we were kicked (our player doc no longer exists), leave the room
+      if(state.currentUser && state.roomCode && state.onlinePlayers.length > 0){
+        const stillHere = state.onlinePlayers.some(p => p.uid === state.currentUser.uid);
+        if(!stillHere){
+          state.onlineError = 'You were kicked from the room.';
+          leaveOnlineRoom();
+          state.screen = 'onlineHome';
+          render();
+          return;
+        }
+      }
       
       if(state.isHost && state.onlineStatus === 'voting'){
           const allVoted = state.onlinePlayers.every(p => p.votedFor);
@@ -1278,12 +1290,17 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     if(btn) btn.style.display = state.roomCode ? 'flex' : 'none';
     if(!root) return;
     if(!state.showChat){ root.innerHTML = ''; return; }
-    const msgs = state.chatMessages.map(m => `
+    const msgs = state.chatMessages.map(m => {
+      const isSystem = m.uid === 'system';
+      if(isSystem){
+        return `<div style="text-align:center; font-size:13px; color:var(--muted); font-family:'Space Mono',monospace; letter-spacing:.04em; padding:4px 0;">${(m.text||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+      }
+      return `
       <div class="chat-msg ${state.currentUser && m.uid === state.currentUser.uid ? 'mine' : ''}">
         <div class="chat-msg-name">${m.name || 'Player'}</div>
         <div class="chat-msg-bubble">${(m.text||'').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
-      </div>
-    `).join('');
+      </div>`;
+    }).join('');
     root.innerHTML = `
       <div class="chat-panel">
         <div class="chat-header">
@@ -1300,7 +1317,35 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     if(list) list.scrollTop = list.scrollHeight;
   }
 
+  function postSystemMessage(text){
+    if(!fbReady || !state.roomCode) return;
+    fbDb.collection('rooms').doc(state.roomCode).collection('messages').add({
+      uid: 'system',
+      name: 'System',
+      text: text,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    }).catch(() => {});
+  }
+
   function leaveOnlineRoom(){
+    const code = state.roomCode;
+    const uid = state.currentUser ? state.currentUser.uid : null;
+    const name = state.currentUser ? state.currentUser.name : 'A player';
+
+    // Remove ourselves from the room so other players see us disappear
+    if(fbReady && code && uid){
+      const playerRef = fbDb.collection('rooms').doc(code).collection('players').doc(uid);
+      playerRef.delete().then(() => {
+        // Post leave message after delete so it still goes to the room
+        fbDb.collection('rooms').doc(code).collection('messages').add({
+          uid: 'system',
+          name: 'System',
+          text: name + ' left the room',
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        }).catch(() => {});
+      }).catch(() => {});
+    }
+
     unsubscribeOnline();
     unsubscribeChat();
     clearTurnTimer();
@@ -1324,6 +1369,30 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     leaveOnlineRoom();
     state.screen = 'start';
     render();
+  }
+
+  function kickPlayer(targetUid){
+    if(!state.isHost || !fbReady || !state.roomCode || !targetUid) return;
+    if(state.currentUser && targetUid === state.currentUser.uid) return; // can't kick yourself
+    playSFX('click');
+
+    const target = state.onlinePlayers.find(p => p.uid === targetUid);
+    const targetName = target ? target.name : 'Player';
+    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+
+    roomRef.collection('players').doc(targetUid).delete()
+      .then(() => {
+        return roomRef.collection('messages').add({
+          uid: 'system',
+          name: 'System',
+          text: targetName + ' was kicked by the host',
+          createdAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+      })
+      .catch(err => {
+        state.onlineError = 'Could not kick player: ' + err.message;
+        render();
+      });
   }
 
   function toggleCloseRoomConfirm(show){
@@ -2055,12 +2124,16 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   function renderOnlineLobby(){
-    const boxes = state.onlinePlayers.map(p => `
-      <div style="display:flex; flex-direction:column; align-items:center; gap:6px; width:80px;">
+    const boxes = state.onlinePlayers.map(p => {
+      const isMe = state.currentUser && p.uid === state.currentUser.uid;
+      const canKick = state.isHost && !isMe;
+      return `
+      <div style="display:flex; flex-direction:column; align-items:center; gap:6px; width:90px; position:relative;">
         ${avatarHtml(p, 52)}
-        <div style="font-size:12px; text-align:center; color:var(--ink); word-break:break-word;">${p.name}${p.uid === state.currentUser.uid ? ' (you)' : ''}</div>
-      </div>
-    `).join('');
+        <div style="font-size:12px; text-align:center; color:var(--ink); word-break:break-word;">${p.name}${isMe ? ' (you)' : ''}</div>
+        ${canKick ? `<button onclick="TI.kickPlayer('${p.uid}')" style="margin-top:2px; background:transparent; border:1px solid var(--red); color:var(--red); border-radius:4px; font-size:10px; padding:2px 8px; cursor:pointer; font-family:'Space Mono',monospace; letter-spacing:.05em; text-transform:uppercase;">Kick</button>` : ''}
+      </div>`;
+    }).join('');
     return `
       <div class="screen">
         <div class="eyebrow" style="display:flex; justify-content:space-between; align-items:center;">
@@ -2296,7 +2369,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     goOnlineHome, goOnlineCreate, updateCreateField, changeCreateMax, submitCreateRoom,
     joinPublicRoom, goOnlineJoinPrivate, updateJoinField, submitJoinPrivate,
     exitOnlineToMenu, startOnlineGame, toggleCloseRoomConfirm, confirmCloseRoom,
-    toggleDeleteRoomConfirm, confirmDeleteRoom,
+    toggleDeleteRoomConfirm, confirmDeleteRoom, kickPlayer,
     goToOnlineRound, onlineBigButtonTap, onlineSkipTurn, goToOnlineWaiting, startOnlineVoting, castOnlineVote, playAgainOnline,
     toggleChat, updateChatInput, sendChatMessage
   };
