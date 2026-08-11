@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v28";
+const GAME_VERSION = "v29";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 
 const firebaseConfig = {
@@ -617,7 +617,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     numPlayers: 3,
     playerNames: ['Player 1', 'Player 2', 'Player 3'],
     mode: 'standard',
-    enableClues: true,
+    clueLevel: 'normal', // 'off' | 'easy' | 'normal' | 'hard'
+    teamMode: false,
+    playerTeams: [], // 0 = Alpha, 1 = Bravo
+    teamScores: [0, 0],
+    lastTeamWinner: null, // 0, 1, or null for tie
     imposterIndex: null,
     targetMs: null,
     imposterClue: '',
@@ -826,9 +830,56 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.targetMs = centi * 10;
 
     const totalSec = state.targetMs / 1000;
-    const lower = Math.max(0, Math.floor(totalSec - (Math.random() * 1.5 + 0.5)));
-    const upper = Math.ceil(totalSec + (Math.random() * 1.5 + 0.5));
-    state.imposterClue = `Target is between ${lower}s and ${upper}s`;
+    const level = state.clueLevel || 'normal';
+    if(level === 'off'){
+      state.imposterClue = '';
+      return;
+    }
+    // Easy = wide range, Normal = medium, Hard = tight range
+    let spreadMin, spreadMax;
+    if(level === 'easy'){ spreadMin = 2.5; spreadMax = 5; }
+    else if(level === 'hard'){ spreadMin = 0.3; spreadMax = 0.8; }
+    else { spreadMin = 0.5; spreadMax = 2; } // normal
+
+    const lowOff = spreadMin + Math.random() * (spreadMax - spreadMin);
+    const highOff = spreadMin + Math.random() * (spreadMax - spreadMin);
+    const lower = Math.max(0, Math.floor(totalSec - lowOff));
+    const upper = Math.ceil(totalSec + highOff);
+    if(level === 'hard'){
+      state.imposterClue = `Very close to ${Math.round(totalSec)}s`;
+    } else {
+      state.imposterClue = `Target is between ${lower}s and ${upper}s`;
+    }
+  }
+
+  function assignTeams(n){
+    const teams = new Array(n).fill(0);
+    const order = shuffledOrder(n);
+    // Split as evenly as possible
+    order.forEach((idx, i) => { teams[idx] = i < Math.ceil(n / 2) ? 0 : 1; });
+    state.playerTeams = teams;
+  }
+
+  function teamName(t){ return t === 0 ? 'Alpha' : 'Bravo'; }
+
+  function computeTeamWinner(){
+    // Average |diff| for non-imposter, non-skip players per team. Lower is better.
+    const sums = [0, 0];
+    const counts = [0, 0];
+    for(let i = 0; i < state.numPlayers; i++){
+      if(i === state.imposterIndex) continue;
+      if(state.times[i] === undefined || state.times[i] === 'SKIP') continue;
+      const team = state.playerTeams[i] || 0;
+      sums[team] += Math.abs(state.times[i] - state.targetMs);
+      counts[team]++;
+    }
+    if(counts[0] === 0 && counts[1] === 0) return null;
+    if(counts[0] === 0) return 1;
+    if(counts[1] === 0) return 0;
+    const avg0 = sums[0] / counts[0];
+    const avg1 = sums[1] / counts[1];
+    if(Math.abs(avg0 - avg1) < 1) return null; // near tie
+    return avg0 < avg1 ? 0 : 1;
   }
 
   function syncNamesCount(){
@@ -1186,12 +1237,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.playerNames[idx] = val || `Player ${idx+1}`;
   }
   function setMode(m){ playSFX('click'); state.mode = m; render(); }
-  function toggleClues(){ playSFX('click'); state.enableClues = !state.enableClues; render(); }
+  function setClueLevel(level){ playSFX('click'); state.clueLevel = level; render(); }
+  function toggleTeamMode(){ playSFX('click'); state.teamMode = !state.teamMode; render(); }
 
   function beginReveal(){
     playSFX('click');
     state.imposterIndex = Math.floor(Math.random() * state.numPlayers);
     generateTargetAndClue();
+    if(state.teamMode){
+      assignTeams(state.numPlayers);
+      if(state.teamScores.length < 2) state.teamScores = [0, 0];
+    } else {
+      state.playerTeams = [];
+    }
+    state.lastTeamWinner = null;
     state.revealIndex = 0;
     state.revealPhase = 'handoff';
     state.screen = 'reveal';
@@ -1270,22 +1329,36 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     playSFX('reveal');
     state.resultsRevealed = true;
 
-    let bestDiff = Infinity;
-    let winnerIdx = null;
-
-    state.playerNames.forEach((_, i) => {
-      if(i !== state.imposterIndex && state.times[i] !== undefined && state.times[i] !== 'SKIP'){
-        const diff = Math.abs(state.times[i] - state.targetMs);
-        if(diff < bestDiff){
-          bestDiff = diff;
-          winnerIdx = i;
-        }
+    if(state.teamMode && state.playerTeams.length === state.numPlayers){
+      const winner = computeTeamWinner();
+      state.lastTeamWinner = winner;
+      if(winner !== null){
+        state.teamScores[winner] = (state.teamScores[winner] || 0) + 1;
       }
-    });
-
-    if(winnerIdx !== null){
-      const pts = 1;
-      state.scores[winnerIdx] = (state.scores[winnerIdx] || 0) + pts;
+      // Also give individual point to closest crew member
+      let bestDiff = Infinity;
+      let winnerIdx = null;
+      state.playerNames.forEach((_, i) => {
+        if(i !== state.imposterIndex && state.times[i] !== undefined && state.times[i] !== 'SKIP'){
+          const diff = Math.abs(state.times[i] - state.targetMs);
+          if(diff < bestDiff){ bestDiff = diff; winnerIdx = i; }
+        }
+      });
+      if(winnerIdx !== null){
+        state.scores[winnerIdx] = (state.scores[winnerIdx] || 0) + 1;
+      }
+    } else {
+      let bestDiff = Infinity;
+      let winnerIdx = null;
+      state.playerNames.forEach((_, i) => {
+        if(i !== state.imposterIndex && state.times[i] !== undefined && state.times[i] !== 'SKIP'){
+          const diff = Math.abs(state.times[i] - state.targetMs);
+          if(diff < bestDiff){ bestDiff = diff; winnerIdx = i; }
+        }
+      });
+      if(winnerIdx !== null){
+        state.scores[winnerIdx] = (state.scores[winnerIdx] || 0) + 1;
+      }
     }
 
     render();
@@ -1411,7 +1484,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       status: 'waiting',
       maxPlayers: state.createRoomMaxPlayers,
       mode: state.mode || 'standard',
-      enableClues: state.enableClues !== false,
+      clueLevel: state.clueLevel || 'normal',
+      teamMode: !!state.teamMode,
+      enableClues: (state.clueLevel || 'normal') !== 'off',
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     }).then(() => {
       return fbDb.collection('rooms').doc(code).collection('players').doc(state.currentUser.uid).set({
@@ -2012,37 +2087,64 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.onlineError = null;
     const roomRef = fbDb.collection('rooms').doc(state.roomCode);
     roomRef.get().then(doc => {
-      const mode = doc.data().mode || 'standard';
-      const enableClues = doc.data().enableClues !== false;
+      const data = doc.data() || {};
+      const mode = data.mode || state.mode || 'standard';
+      const clueLevel = data.clueLevel || state.clueLevel || 'normal';
+      const teamMode = data.teamMode != null ? data.teamMode : !!state.teamMode;
       let minS = 1, maxS = 9;
       if(mode === 'fast'){ minS = 0.5; maxS = 3; }
       if(mode === 'marathon'){ minS = 10; maxS = 20; }
       const centi = Math.floor(Math.random() * (maxS*100 - minS*100 + 1)) + (minS*100);
       const targetMs = centi * 10;
       const totalSec = targetMs / 1000;
-      const lower = Math.max(0, Math.floor(totalSec - (Math.random()*1.5+0.5)));
-      const upper = Math.ceil(totalSec + (Math.random()*1.5+0.5));
-      const clue = `Target is between ${lower}s and ${upper}s`;
+
+      let clue = null;
+      if(clueLevel !== 'off'){
+        let spreadMin, spreadMax;
+        if(clueLevel === 'easy'){ spreadMin = 2.5; spreadMax = 5; }
+        else if(clueLevel === 'hard'){ spreadMin = 0.3; spreadMax = 0.8; }
+        else { spreadMin = 0.5; spreadMax = 2; }
+        const lowOff = spreadMin + Math.random() * (spreadMax - spreadMin);
+        const highOff = spreadMin + Math.random() * (spreadMax - spreadMin);
+        const lower = Math.max(0, Math.floor(totalSec - lowOff));
+        const upper = Math.ceil(totalSec + highOff);
+        clue = clueLevel === 'hard'
+          ? `Very close to ${Math.round(totalSec)}s`
+          : `Target is between ${lower}s and ${upper}s`;
+      }
 
       const imposterUid = state.onlinePlayers[Math.floor(Math.random()*state.onlinePlayers.length)].uid;
       const turnOrder = shuffledOrder(state.onlinePlayers.length).map(i => state.onlinePlayers[i].uid);
+
+      // Assign teams evenly if team mode
+      const teamByUid = {};
+      if(teamMode){
+        const order = shuffledOrder(state.onlinePlayers.length);
+        order.forEach((idx, i) => {
+          teamByUid[state.onlinePlayers[idx].uid] = i < Math.ceil(state.onlinePlayers.length / 2) ? 0 : 1;
+        });
+      }
 
       const batch = fbDb.batch();
       state.onlinePlayers.forEach(p => {
         const isImp = p.uid === imposterUid;
         const secretRef = roomRef.collection('secrets').doc(p.uid);
         batch.set(secretRef, isImp
-          ? { isImposter: true, clue: enableClues ? clue : null }
+          ? { isImposter: true, clue: clue }
           : { isImposter: false, targetMs: targetMs }
         );
-        batch.update(roomRef.collection('players').doc(p.uid), { time: null, submitted: false, votedFor: null });
+        const pUpdate = { time: null, submitted: false, votedFor: null, timing: false, skipped: false };
+        if(teamMode) pUpdate.team = teamByUid[p.uid];
+        batch.update(roomRef.collection('players').doc(p.uid), pUpdate);
       });
       batch.update(roomRef, {
         status: 'reveal',
         turnOrder: turnOrder,
         currentTurnIndex: 0,
         turnPhase: 'play',
-        reviewEndsAt: null
+        reviewEndsAt: null,
+        clueLevel: clueLevel,
+        teamMode: teamMode
       });
       roomRef.set({ _imposterUidPending: imposterUid, _targetMsPending: targetMs }, { merge: true });
       return batch.commit();
@@ -2381,16 +2483,24 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         </div>
 
         <div class="card">
-          <div class="role-label">Game Mode</div>
+          <div class="role-label">Timer Length</div>
           <div class="mode-selector">
             <button class="chip-btn ${state.mode==='fast'?'active':''}" onclick="TI.setMode('fast')">⚡ Fast</button>
             <button class="chip-btn ${state.mode==='standard'?'active':''}" onclick="TI.setMode('standard')">🎯 Standard</button>
             <button class="chip-btn ${state.mode==='marathon'?'active':''}" onclick="TI.setMode('marathon')">⏱ Marathon</button>
           </div>
-          <div class="role-label" style="margin-top:12px;">Imposter Clue Hint</div>
-          <div class="option-toggle">
-            <button class="chip-btn ${state.enableClues?'active':''}" onclick="TI.toggleClues()">${state.enableClues ? 'ON (Gives range hint)' : 'OFF (Pure Blind)'}</button>
+          <div class="role-label" style="margin-top:12px;">Imposter Clue Level</div>
+          <div class="mode-selector" style="flex-wrap:wrap;">
+            <button class="chip-btn ${state.clueLevel==='off'?'active':''}" onclick="TI.setClueLevel('off')">Off</button>
+            <button class="chip-btn ${state.clueLevel==='easy'?'active':''}" onclick="TI.setClueLevel('easy')">Easy</button>
+            <button class="chip-btn ${state.clueLevel==='normal'?'active':''}" onclick="TI.setClueLevel('normal')">Normal</button>
+            <button class="chip-btn ${state.clueLevel==='hard'?'active':''}" onclick="TI.setClueLevel('hard')">Hard</button>
           </div>
+          <div class="role-label" style="margin-top:12px;">Team Mode</div>
+          <div class="option-toggle">
+            <button class="chip-btn ${state.teamMode?'active':''}" onclick="TI.toggleTeamMode()">${state.teamMode ? 'ON — Alpha vs Bravo' : 'OFF — Solo scoring'}</button>
+          </div>
+          ${state.teamMode ? `<p class="helper-note" style="margin-top:8px;">Players split into Team Alpha &amp; Team Bravo. Best average accuracy (excluding Imposter) wins the round for their team.</p>` : ''}
         </div>
 
         <div class="spacer"></div>
@@ -2443,9 +2553,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             <div class="reveal-inner">
               ${isImposter
                 ? `<div class="role-label">Role</div><div class="imposter-text">You are<br>the Imposter</div>
-                   ${state.enableClues ? `<div class="clue-badge">💡 Clue: ${state.imposterClue}</div>` : ''}
+                   ${(state.clueLevel !== 'off' && state.imposterClue) ? `<div class="clue-badge">💡 Clue: ${state.imposterClue}</div>` : ''}
+                   ${state.teamMode ? `<div class="clue-badge" style="border-color:var(--line); color:var(--ink); margin-top:6px;">Team ${teamName(state.playerTeams[state.revealIndex] || 0)}</div>` : ''}
                    <p class="helper-note">Blend in! Guess your timing and don't let anyone catch you.</p>`
-                : `<div class="role-label">Target Time</div><div class="target-time">${formatTime(state.targetMs)}</div><p class="helper-note">Memorize it. Try to land as close to this exact time as possible.</p>`
+                : `<div class="role-label">Target Time</div><div class="target-time">${formatTime(state.targetMs)}</div>
+                   ${state.teamMode ? `<div class="clue-badge" style="border-color:var(--line); color:var(--ink); margin-top:6px;">Team ${teamName(state.playerTeams[state.revealIndex] || 0)}</div>` : ''}
+                   <p class="helper-note">Memorize it. Try to land as close to this exact time as possible.</p>`
               }
             </div>
           </div>
@@ -2523,11 +2636,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     for(let i=0; i<state.numPlayers; i++){
       const isImp = state.resultsRevealed && i === state.imposterIndex;
       const skipped = state.times[i] === 'SKIP';
+      const teamTag = state.teamMode && state.playerTeams.length ? `<span class="rtag" style="color:var(--muted);">TEAM ${teamName(state.playerTeams[i] || 0).toUpperCase()}</span>` : '';
       rows += `
         <div class="result-row ${isImp?'imposter-row':''}">
           <div>
             <div class="rname">${state.playerNames[i]}</div>
             ${isImp ? `<span class="rtag">IMPOSTER</span>` : ''}
+            ${teamTag}
           </div>
           <div class="rtime" style="${skipped ? 'font-size:15px; color:var(--muted);' : ''}">${skipped ? 'SKIPPED' : formatTime(state.times[i])}</div>
         </div>`;
@@ -2540,11 +2655,27 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       </div>
     `).join('');
 
+    const teamBoard = state.teamMode ? `
+      <div class="scoreboard" style="margin-bottom:10px;">
+        <div>
+          <div style="color:var(--muted);">Team Alpha</div>
+          <div class="score-val">${state.teamScores[0]||0}</div>
+        </div>
+        <div>
+          <div style="color:var(--muted);">Team Bravo</div>
+          <div class="score-val">${state.teamScores[1]||0}</div>
+        </div>
+      </div>
+      ${state.resultsRevealed && state.lastTeamWinner !== null ? `<div class="winner-banner crew">Team ${teamName(state.lastTeamWinner)} wins the round!</div>` : ''}
+      ${state.resultsRevealed && state.lastTeamWinner === null ? `<p class="helper-note" style="text-align:center;">Team accuracy was a tie this round.</p>` : ''}
+    ` : '';
+
     return `
       <div class="screen">
         <div class="eyebrow">Match Debrief // Round ${state.matchRound}</div>
         <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Results</h1>
         
+        ${teamBoard}
         <div class="scoreboard">${scoresList}</div>
 
         ${state.resultsRevealed ? `
@@ -2619,11 +2750,22 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         ${renderErrorBanner()}
 
         <div class="card">
-          <div class="role-label">Game Mode</div>
+          <div class="role-label">Timer Length</div>
           <div class="mode-selector">
             <button class="chip-btn ${state.mode==='fast'?'active':''}" onclick="TI.setMode('fast')">⚡ Fast</button>
             <button class="chip-btn ${state.mode==='standard'?'active':''}" onclick="TI.setMode('standard')">🎯 Standard</button>
             <button class="chip-btn ${state.mode==='marathon'?'active':''}" onclick="TI.setMode('marathon')">⏱ Marathon</button>
+          </div>
+          <div class="role-label" style="margin-top:12px;">Imposter Clue Level</div>
+          <div class="mode-selector" style="flex-wrap:wrap;">
+            <button class="chip-btn ${state.clueLevel==='off'?'active':''}" onclick="TI.setClueLevel('off')">Off</button>
+            <button class="chip-btn ${state.clueLevel==='easy'?'active':''}" onclick="TI.setClueLevel('easy')">Easy</button>
+            <button class="chip-btn ${state.clueLevel==='normal'?'active':''}" onclick="TI.setClueLevel('normal')">Normal</button>
+            <button class="chip-btn ${state.clueLevel==='hard'?'active':''}" onclick="TI.setClueLevel('hard')">Hard</button>
+          </div>
+          <div class="role-label" style="margin-top:12px;">Team Mode</div>
+          <div class="option-toggle">
+            <button class="chip-btn ${state.teamMode?'active':''}" onclick="TI.toggleTeamMode()">${state.teamMode ? 'ON — Alpha vs Bravo' : 'OFF — Solo'}</button>
           </div>
           <div style="display:flex; gap:8px; margin-top:12px;">
             <button class="btn solid" style="font-size:16px; padding:10px;" onclick="TI.goOnlineCreate(false)">+ Create Public</button>
@@ -2764,8 +2906,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             <div class="reveal-inner">
               ${isImposter
                 ? `<div class="role-label">Role</div><div class="imposter-text">You are<br>the Imposter</div>
-                   ${state.onlineSecret.clue ? `<div class="clue-badge">💡 Clue: ${state.onlineSecret.clue}</div>` : ''}`
-                : `<div class="role-label">Target Time</div><div class="target-time">${formatTime(state.onlineSecret.targetMs)}</div>`
+                   ${state.onlineSecret.clue ? `<div class="clue-badge">💡 Clue: ${state.onlineSecret.clue}</div>` : ''}
+                   ${(() => { const me = state.onlinePlayers.find(p => p.uid === state.currentUser.uid); return (me && me.team != null) ? `<div class="clue-badge" style="border-color:var(--line); color:var(--ink); margin-top:6px;">Team ${teamName(me.team)}</div>` : ''; })()}`
+                : `<div class="role-label">Target Time</div><div class="target-time">${formatTime(state.onlineSecret.targetMs)}</div>
+                   ${(() => { const me = state.onlinePlayers.find(p => p.uid === state.currentUser.uid); return (me && me.team != null) ? `<div class="clue-badge" style="border-color:var(--line); color:var(--ink); margin-top:6px;">Team ${teamName(me.team)}</div>` : ''; })()}`
               }
             </div>
           </div>
@@ -3003,7 +3147,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   window.TI = {
-    goStart, toggleHelp, toggleAccounts, toggleAudio, goSetup, changePlayers, updateName, setMode, toggleClues,
+    goStart, toggleHelp, toggleAccounts, toggleAudio, goSetup, changePlayers, updateName, setMode, setClueLevel, toggleTeamMode,
     beginReveal, revealHandoffTap, revealCardTap, revealNext,
     goToGame, roundHandoffTap, bigButtonTap, nextPlayerTap, skipTurn,
     toggleReveal, nextRound,
