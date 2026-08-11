@@ -553,7 +553,7 @@
 <div id="chatPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v25";
+const GAME_VERSION = "v26";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 
 const firebaseConfig = {
@@ -654,6 +654,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             email: (user.email || '').toLowerCase(),
             isOwner: (user.email || '').toLowerCase() === OWNER_EMAIL
           };
+          loadSavedProfile();
         } else {
           state.currentUser = null;
         }
@@ -871,6 +872,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         email: (u.email || '').toLowerCase(),
         isOwner: (u.email || '').toLowerCase() === OWNER_EMAIL
       };
+      loadSavedProfile();
       state.signInBlocked = false;
       render();
     }).catch(err => {
@@ -897,6 +899,57 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.currentUser = null;
     leaveOnlineRoom();
     render();
+  }
+
+  function saveProfile(){
+    if(!state.currentUser) return;
+    playSFX('click');
+    const nameInput = document.getElementById('profileNameInput');
+    const photoInput = document.getElementById('profilePhotoInput');
+    let newName = (nameInput ? nameInput.value : '').trim().slice(0, 20);
+    if(!newName) newName = 'Player';
+    let newPhoto = (photoInput ? photoInput.value : '').trim();
+    // basic safety: only allow http(s) image-looking urls or empty
+    if(newPhoto && !/^https?:\/\/.+/i.test(newPhoto)){
+      state.onlineError = 'Photo URL must start with http:// or https://';
+      // show error inside modal by re-render after a moment - use alert style via onlineError on start
+      render();
+      return;
+    }
+
+    state.currentUser.name = newName;
+    state.currentUser.photoURL = newPhoto || state.currentUser.photoURL || '';
+
+    try {
+      localStorage.setItem('ti_profile', JSON.stringify({
+        name: state.currentUser.name,
+        photoURL: state.currentUser.photoURL
+      }));
+    } catch(e){}
+
+    // If currently in a room, update the player document so others see the change
+    if(fbReady && state.roomCode){
+      fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(state.currentUser.uid).update({
+        name: state.currentUser.name,
+        photoURL: state.currentUser.photoURL || '',
+        isOwner: !!state.currentUser.isOwner
+      }).catch(() => {});
+    }
+
+    state.showAccounts = false;
+    render();
+  }
+
+  function loadSavedProfile(){
+    try {
+      const raw = localStorage.getItem('ti_profile');
+      if(!raw) return;
+      const data = JSON.parse(raw);
+      if(state.currentUser && data){
+        if(data.name) state.currentUser.name = data.name;
+        if(data.photoURL !== undefined) state.currentUser.photoURL = data.photoURL || '';
+      }
+    } catch(e){}
   }
 
   function loadSoundPref(){
@@ -1642,12 +1695,24 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.onlineRoundPhase = 'stopped';
       const reviewEndsAt = Date.now() + (REVIEW_SECONDS * 1000);
 
+      // Optimistic local update so we don't get stuck on "Submitted! / DONE"
+      state.onlineTurnPhase = 'review';
+      state.onlineReviewEndsAt = reviewEndsAt;
+      // Also patch local player list so the time shows immediately
+      const me = state.onlinePlayers.find(p => p.uid === state.currentUser.uid);
+      if(me){ me.time = elapsed; me.submitted = true; me.skipped = false; me.timing = false; }
+      startReviewTimer(reviewEndsAt);
+
       // Save the time and switch room into shared review phase so everyone sees the score
       playerRef.update({ time: elapsed, submitted: true, skipped: false, timing: false })
         .then(() => roomRef.update({
           turnPhase: 'review',
           reviewEndsAt: reviewEndsAt
-        }));
+        }))
+        .catch(err => {
+          state.onlineError = 'Could not submit time: ' + err.message;
+          render();
+        });
       render();
     }
   }
@@ -1662,11 +1727,22 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const roomRef = fbDb.collection('rooms').doc(state.roomCode);
     const reviewEndsAt = Date.now() + (REVIEW_SECONDS * 1000);
 
+    // Optimistic local update
+    state.onlineTurnPhase = 'review';
+    state.onlineReviewEndsAt = reviewEndsAt;
+    const me = state.onlinePlayers.find(p => p.uid === state.currentUser.uid);
+    if(me){ me.time = null; me.submitted = true; me.skipped = true; me.timing = false; }
+    startReviewTimer(reviewEndsAt);
+
     roomRef.collection('players').doc(state.currentUser.uid).update({ time: null, submitted: true, skipped: true, timing: false })
       .then(() => roomRef.update({
         turnPhase: 'review',
         reviewEndsAt: reviewEndsAt
-      }));
+      }))
+      .catch(err => {
+        state.onlineError = 'Could not skip: ' + err.message;
+        render();
+      });
     render();
   }
 
@@ -1847,9 +1923,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         <div class="modal-overlay" onclick="TI.toggleAccounts(false)">
           <div class="modal-card" onclick="event.stopPropagation()">
             <div class="eyebrow">Account</div>
-            <h2 class="modal-title">SIGNED IN</h2>
-            <p class="help-body">Signed in as <strong>${state.currentUser.isOwner ? '<span style="color:var(--amber);">[Owner] ' + state.currentUser.name + '</span>' : state.currentUser.name}</strong>.</p>
-            <button class="btn danger" style="margin-top:16px;" onclick="TI.signOut()">Sign Out</button>
+            <h2 class="modal-title">PROFILE</h2>
+            <div style="display:flex; justify-content:center; margin-bottom:14px;">
+              ${avatarHtml(state.currentUser, 64)}
+            </div>
+            <p class="help-body" style="text-align:center; margin-bottom:14px;">
+              ${state.currentUser.isOwner ? '<span style="color:var(--amber);">[Owner] ' + state.currentUser.name + '</span>' : state.currentUser.name}
+            </p>
+            <div class="role-label">Display Name</div>
+            <input class="input-field" type="text" id="profileNameInput" value="${(state.currentUser.name || '').replace(/"/g,'&quot;')}" maxlength="20" placeholder="Your name" />
+            <div class="role-label" style="margin-top:12px;">Profile Picture URL (optional)</div>
+            <input class="input-field" type="text" id="profilePhotoInput" value="${(state.currentUser.photoURL || '').replace(/"/g,'&quot;')}" placeholder="https://example.com/photo.jpg" />
+            <p class="helper-note" style="margin-top:6px;">Paste any image link, or leave blank to use your Google photo.</p>
+            <button class="btn solid" style="margin-top:16px;" onclick="TI.saveProfile()">Save Profile</button>
+            <button class="btn danger" style="margin-top:10px;" onclick="TI.signOut()">Sign Out</button>
             <button class="btn ghost" style="margin-top:10px;" onclick="TI.toggleAccounts(false)">Close</button>
           </div>
         </div>`;
@@ -2514,7 +2601,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     goToGame, roundHandoffTap, bigButtonTap, nextPlayerTap, skipTurn,
     toggleReveal, nextRound,
     goPractice, practiceBigButtonTap, practiceRestart,
-    signInWithGoogle, signOut,
+    signInWithGoogle, signOut, saveProfile,
     goOnlineHome, goOnlineCreate, updateCreateField, changeCreateMax, submitCreateRoom,
     joinPublicRoom, goOnlineJoinPrivate, updateJoinField, submitJoinPrivate,
     exitOnlineToMenu, startOnlineGame, toggleCloseRoomConfirm, confirmCloseRoom,
