@@ -551,7 +551,7 @@
 <div id="chatPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v21";
+const GAME_VERSION = "v20";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -621,7 +621,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     resultsRevealed: false,
     matchRound: 1,
     scores: [],
-    practicePhase: 'ready',
+    practicePhase: 'ready', // 'ready' | 'running' | 'stopped'
     practiceStart: null,
     practiceElapsed: null
   };
@@ -676,6 +676,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       }
     }, 1000);
   }
+
 
   function playSFX(type){
     if(!state.soundEnabled) return;
@@ -2196,6 +2197,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
   document.getElementById('versionTag').textContent = GAME_VERSION;
 
+  // Force-refresh if the WebView is serving a stale cached copy.
+  // version.json is tiny and fetched with cache disabled, so it's always fresh —
+  // if it doesn't match the version baked into this loaded page, reload with a cache-buster.
   try {
     fetch('version.json?t=' + Date.now(), { cache: 'no-store' })
       .then(r => r.json())
@@ -2217,4 +2221,4 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 })();
 </script>
 </body>
-</html>
+  </html>
