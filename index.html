@@ -553,7 +553,8 @@
 <div id="chatPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v24";
+const GAME_VERSION = "v25";
+const OWNER_EMAIL = "kobik8512@gmail.com";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -646,7 +647,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
       fbAuth.onAuthStateChanged(user => {
         if (user) {
-          state.currentUser = { uid: user.uid, name: user.displayName || 'Player', photoURL: user.photoURL || '' };
+          state.currentUser = {
+            uid: user.uid,
+            name: user.displayName || 'Player',
+            photoURL: user.photoURL || '',
+            email: (user.email || '').toLowerCase(),
+            isOwner: (user.email || '').toLowerCase() === OWNER_EMAIL
+          };
         } else {
           state.currentUser = null;
         }
@@ -657,7 +664,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       fbAuth.getRedirectResult().then(result => {
         if (result && result.user) {
           const u = result.user;
-          state.currentUser = { uid: u.uid, name: u.displayName || 'Player', photoURL: u.photoURL || '' };
+          state.currentUser = {
+            uid: u.uid,
+            name: u.displayName || 'Player',
+            photoURL: u.photoURL || '',
+            email: (u.email || '').toLowerCase(),
+            isOwner: (u.email || '').toLowerCase() === OWNER_EMAIL
+          };
           state.authSettled = true;
           render();
         }
@@ -772,10 +785,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
   function avatarHtml(p, size){
     size = size || 40;
+    const borderColor = p.isOwner ? 'var(--amber)' : 'var(--line)';
     if(p.photoURL){
-      return `<img src="${p.photoURL}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;border:2px solid var(--line);" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><div style="display:none;width:${size}px;height:${size}px;border-radius:50%;background:var(--green-dim);color:var(--ink);align-items:center;justify-content:center;font-weight:700;">${(p.name||'?')[0].toUpperCase()}</div>`;
+      return `<img src="${p.photoURL}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;border:2px solid ${borderColor};" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><div style="display:none;width:${size}px;height:${size}px;border-radius:50%;background:var(--green-dim);color:var(--ink);align-items:center;justify-content:center;font-weight:700;">${(p.name||'?')[0].toUpperCase()}</div>`;
     }
-    return `<div style="width:${size}px;height:${size}px;border-radius:50%;background:var(--green-dim);color:var(--ink);display:flex;align-items:center;justify-content:center;font-weight:700;flex:none;">${(p.name||'?')[0].toUpperCase()}</div>`;
+    return `<div style="width:${size}px;height:${size}px;border-radius:50%;background:var(--green-dim);color:var(--ink);display:flex;align-items:center;justify-content:center;font-weight:700;flex:none;border:2px solid ${borderColor};">${(p.name||'?')[0].toUpperCase()}</div>`;
+  }
+
+  function formatPlayerName(p, opts){
+    opts = opts || {};
+    const name = (p && p.name) ? p.name : 'Player';
+    if(p && p.isOwner){
+      return `<span style="color:var(--amber);">[Owner]</span> <span style="color:var(--amber);">${name}</span>`;
+    }
+    return name;
   }
 
   function generateTargetAndClue(){
@@ -841,7 +864,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
     fbAuth.signInWithPopup(provider).then(result => {
       const u = result.user;
-      state.currentUser = { uid: u.uid, name: u.displayName || 'Player', photoURL: u.photoURL || '' };
+      state.currentUser = {
+        uid: u.uid,
+        name: u.displayName || 'Player',
+        photoURL: u.photoURL || '',
+        email: (u.email || '').toLowerCase(),
+        isOwner: (u.email || '').toLowerCase() === OWNER_EMAIL
+      };
       state.signInBlocked = false;
       render();
     }).catch(err => {
@@ -1126,7 +1155,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     }).then(() => {
       return fbDb.collection('rooms').doc(code).collection('players').doc(state.currentUser.uid).set({
-        name: state.currentUser.name, photoURL: state.currentUser.photoURL || '', joined: firebase.firestore.FieldValue.serverTimestamp(), votedFor: null
+        name: state.currentUser.name,
+        photoURL: state.currentUser.photoURL || '',
+        isOwner: !!state.currentUser.isOwner,
+        joined: firebase.firestore.FieldValue.serverTimestamp(),
+        votedFor: null
       });
     }).then(() => {
       state.onlineMaxPlayers = state.createRoomMaxPlayers;
@@ -1191,7 +1224,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           state.onlineMaxPlayers = doc.data().maxPlayers || 10;
           state.onlineError = null;
           return roomRef.collection('players').doc(state.currentUser.uid).set({
-            name: state.currentUser.name, photoURL: state.currentUser.photoURL || '', joined: firebase.firestore.FieldValue.serverTimestamp(), votedFor: null
+            name: state.currentUser.name,
+            photoURL: state.currentUser.photoURL || '',
+            isOwner: !!state.currentUser.isOwner,
+            joined: firebase.firestore.FieldValue.serverTimestamp(),
+            votedFor: null
           }).then(() => {
             state.screen = 'onlineLobby';
             subscribeToRoom(code);
@@ -1811,7 +1848,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           <div class="modal-card" onclick="event.stopPropagation()">
             <div class="eyebrow">Account</div>
             <h2 class="modal-title">SIGNED IN</h2>
-            <p class="help-body">Signed in as <strong>${state.currentUser.name}</strong>.</p>
+            <p class="help-body">Signed in as <strong>${state.currentUser.isOwner ? '<span style="color:var(--amber);">[Owner] ' + state.currentUser.name + '</span>' : state.currentUser.name}</strong>.</p>
             <button class="btn danger" style="margin-top:16px;" onclick="TI.signOut()">Sign Out</button>
             <button class="btn ghost" style="margin-top:10px;" onclick="TI.toggleAccounts(false)">Close</button>
           </div>
@@ -1840,7 +1877,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         <div class="eyebrow">Classified Op // Pass &amp; Play</div>
         <h1 class="title-main">TIMER<br>IMPOSTER</h1>
         <p class="sub">Everyone but one player knows the secret target time.<br>Blind-tap the hidden stopwatch and catch the imposter!</p>
-        ${signedIn ? `<p class="helper-note" style="margin-top:10px;">Signed in as <strong style="color:var(--green);">${state.currentUser.name}</strong></p>` : ''}
+        ${signedIn ? `<p class="helper-note" style="margin-top:10px;">Signed in as <strong style="color:${state.currentUser.isOwner ? 'var(--amber)' : 'var(--green)'};">${state.currentUser.isOwner ? '[Owner] ' : ''}${state.currentUser.name}</strong></p>` : ''}
         <div class="spacer"></div>
         <div class="row-gap" style="width:100%;">
           <button class="btn solid" onclick="TI.goSetup()">Start Game (Local)</button>
@@ -2224,7 +2261,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       return `
       <div style="display:flex; flex-direction:column; align-items:center; gap:6px; width:90px; position:relative;">
         ${avatarHtml(p, 52)}
-        <div style="font-size:12px; text-align:center; color:var(--ink); word-break:break-word;">${p.name}${isMe ? ' (you)' : ''}</div>
+        <div style="font-size:12px; text-align:center; color:var(--ink); word-break:break-word;">${formatPlayerName(p)}${isMe ? ' (you)' : ''}</div>
         ${canKick ? `<button onclick="TI.kickPlayer('${p.uid}')" style="margin-top:2px; background:transparent; border:1px solid var(--red); color:var(--red); border-radius:4px; font-size:10px; padding:2px 8px; cursor:pointer; font-family:'Space Mono',monospace; letter-spacing:.05em; text-transform:uppercase;">Kick</button>` : ''}
       </div>`;
     }).join('');
@@ -2277,7 +2314,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     if(done.length === 0) return '';
     const rows = done.map(p => `
       <div class="result-row">
-        <div style="display:flex; align-items:center; gap:8px;">${avatarHtml(p, 28)}<span class="rname">${p.name}</span></div>
+        <div style="display:flex; align-items:center; gap:8px;">${avatarHtml(p, 28)}<span class="rname">${formatPlayerName(p)}</span></div>
         <div class="rtime">${p.skipped ? 'SKIPPED' : formatTime(p.time)}</div>
       </div>
     `).join('');
@@ -2287,13 +2324,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function renderOnlineRound(){
     const currentUid = state.onlineTurnOrder[state.onlineCurrentTurnIndex];
     const currentPlayer = state.onlinePlayers.find(p => p.uid === currentUid);
-    const currentName = currentPlayer ? currentPlayer.name : 'Player';
+    const currentNameHtml = currentPlayer ? formatPlayerName(currentPlayer) : 'Player';
+    const currentNamePlain = currentPlayer ? currentPlayer.name : 'Player';
     const myTurn = state.currentUser && currentUid === state.currentUser.uid;
     const isReview = state.onlineTurnPhase === 'review';
     const turnNum = state.onlineCurrentTurnIndex + 1;
     const totalTurns = state.onlineTurnOrder.length;
 
-    // ===== REVIEW PHASE: everyone sees the score + 10s countdown =====
+    // ===== REVIEW PHASE: show the exact time first, then countdown =====
     if(isReview){
       const timeText = currentPlayer
         ? (currentPlayer.skipped ? 'SKIPPED' : (currentPlayer.time != null ? formatTime(currentPlayer.time) : '—'))
@@ -2302,8 +2340,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       return `
         <div class="screen">
           <div class="round-wrap">
-            <div class="round-progress">TURN ${turnNum} OF ${totalTurns} — ${currentName}</div>
-            <div class="player-name" style="font-size:28px; margin:0;">${currentName}'s time</div>
+            <div class="round-progress">TURN ${turnNum} OF ${totalTurns}</div>
+            <div style="font-size:18px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em;">${currentNameHtml} stopped at</div>
             <div class="timer-display revealed">${timeText}</div>
             <p class="helper-note" style="color:var(--amber); font-size:18px;">Next turn in ${secs}s</p>
             ${renderLiveTimesList()}
@@ -2320,11 +2358,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           <div class="round-wrap">
             <div class="round-progress">TURN ${turnNum} OF ${totalTurns}</div>
             <div class="hand-icon">${isTiming ? '⏱' : '👆'}</div>
-            <div class="player-name" style="font-size:32px; margin:0 0 8px;">${currentName}'s turn</div>
+            <div class="player-name" style="font-size:32px; margin:0 0 8px;">${currentNameHtml}'s turn</div>
             ${isTiming
               ? `<div class="timer-display hidden-val">••:••</div>
-                 <p class="helper-note">${currentName} is timing right now...</p>`
-              : `<p class="helper-note">Waiting for ${currentName} to start the timer...</p>`
+                 <p class="helper-note">${currentNamePlain} is timing right now...</p>`
+              : `<p class="helper-note">Waiting for ${currentNamePlain} to start the timer...</p>`
             }
             ${renderLiveTimesList()}
           </div>
@@ -2362,7 +2400,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const total = state.onlinePlayers.length;
     const done = state.onlinePlayers.filter(p => p.submitted).length;
     const rows = state.onlinePlayers.map(p => `
-      <div class="result-row"><div class="rname">${p.name}</div><div class="rtag" style="color:${p.submitted ? 'var(--green)' : 'var(--muted)'};">${p.submitted ? 'DONE' : 'WAITING'}</div></div>
+      <div class="result-row"><div class="rname">${formatPlayerName(p)}</div><div class="rtag" style="color:${p.submitted ? 'var(--green)' : 'var(--muted)'};">${p.submitted ? 'DONE' : 'WAITING'}</div></div>
     `).join('');
     return `
       <div class="screen">
@@ -2378,11 +2416,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const myVote = state.onlineVotedFor;
     const rows = state.onlinePlayers.map(p => {
       if (p.uid === state.currentUser.uid) {
-         return `<div class="result-row"><div class="rname">${p.name} (You)</div><div class="rtime">${p.time != null ? formatTime(p.time) : '—'}</div></div>`;
+         return `<div class="result-row"><div class="rname">${formatPlayerName(p)} (You)</div><div class="rtime">${p.time != null ? formatTime(p.time) : '—'}</div></div>`;
       }
       return `
         <div class="result-row">
-          <div><div class="rname">${p.name}</div><div class="rtag" style="color:var(--muted); font-size: 12px;">Time: ${p.time != null ? formatTime(p.time) : '—'}</div></div>
+          <div><div class="rname">${formatPlayerName(p)}</div><div class="rtag" style="color:var(--muted); font-size: 12px;">Time: ${p.time != null ? formatTime(p.time) : '—'}</div></div>
           ${myVote ? (myVote === p.uid ? `<span class="rtag" style="color:var(--amber);">VOTED</span>` : '') : `<button class="chip-btn active" style="flex:none; padding:6px 12px; border-color:var(--amber); color:var(--amber); background:rgba(255,184,77,0.1);" onclick="TI.castOnlineVote('${p.uid}')">VOTE IMPOSTER</button>`}
         </div>`;
     }).join('');
@@ -2405,7 +2443,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       return `
         <div class="result-row ${isImp?'imposter-row':''} ${!isImp && isSuspected?'crew-row':''}">
           <div>
-            <div class="rname">${p.name}</div>
+            <div class="rname">${formatPlayerName(p)}</div>
             ${isImp ? `<span class="rtag">REAL IMPOSTER</span>` : ''}
             ${isSuspected ? `<span class="rtag" style="color:var(--amber);">VOTED OUT</span>` : ''}
           </div>
