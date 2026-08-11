@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v27";
+const GAME_VERSION = "v28";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 
 const firebaseConfig = {
@@ -644,7 +644,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     adminTarget: '',
     adminError: null,
     adminSuccess: null,
-    isMuted: false
+    isMuted: false,
+    isBanned: false,
+    banMessage: '',
+    userDocUnsub: null
   };
 
   try {
@@ -959,6 +962,41 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     return 'user' + Date.now().toString().slice(-6);
   }
 
+  function applyUserFlags(data){
+    if(!data) return;
+    if(data.banned){
+      state.isBanned = true;
+      state.banMessage = data.banReason || 'You have been banned from Timer Imposter by an administrator.';
+      leaveOnlineRoom();
+      state.screen = 'banned';
+      render();
+      return true;
+    }
+    // Unbanned
+    if(state.isBanned){
+      state.isBanned = false;
+      state.banMessage = '';
+      if(state.screen === 'banned') state.screen = 'start';
+    }
+    state.currentUser.mutedUntil = data.mutedUntil || null;
+    state.isMuted = !!(data.mutedUntil && data.mutedUntil > Date.now());
+    if(data.name) state.currentUser.name = data.name;
+    if(data.username) state.currentUser.username = data.username;
+    if(data.photoURL !== undefined) state.currentUser.photoURL = data.photoURL || state.currentUser.photoURL || '';
+    return false;
+  }
+
+  function subscribeToUserDoc(){
+    if(!fbReady || !state.currentUser) return;
+    if(state.userDocUnsub){ state.userDocUnsub(); state.userDocUnsub = null; }
+    state.userDocUnsub = fbDb.collection('users').doc(state.currentUser.uid)
+      .onSnapshot(snap => {
+        if(!snap.exists) return;
+        applyUserFlags(snap.data());
+        render();
+      }, err => console.warn('User doc listen error:', err));
+  }
+
   async function ensureUserDoc(){
     if(!fbReady || !state.currentUser) return null;
     const uref = fbDb.collection('users').doc(state.currentUser.uid);
@@ -977,27 +1015,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         createdAt: firebase.firestore.FieldValue.serverTimestamp()
       });
       state.currentUser.username = uname;
+      subscribeToUserDoc();
       return { name: state.currentUser.name, username: uname, nameChangedAt: null, usernameChangedAt: null, mutedUntil: null, banned: false };
     }
     const data = snap.data();
-    if(data.banned){
-      await fbAuth.signOut();
-      state.currentUser = null;
-      state.onlineError = 'You are banned from Timer Imposter.';
-      state.screen = 'start';
-      render();
-      return null;
-    }
+    if(applyUserFlags(data)) return null;
+
     // Auto-assign username if missing
     if(!data.username){
       const uname = await claimDefaultUsername(state.currentUser.uid);
       await uref.set({ username: uname }, { merge: true });
       data.username = uname;
+      state.currentUser.username = uname;
     }
-    if(data.name) state.currentUser.name = data.name;
-    if(data.username) state.currentUser.username = data.username;
-    state.currentUser.mutedUntil = data.mutedUntil || null;
-    state.isMuted = data.mutedUntil && data.mutedUntil > Date.now();
+    subscribeToUserDoc();
     return data;
   }
 
@@ -1583,19 +1614,45 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function sendChatMessage(){
     const text = (state.chatInput || '').trim();
     if(!text || !state.roomCode || !state.currentUser) return;
-    if(state.isMuted || (state.currentUser.mutedUntil && state.currentUser.mutedUntil > Date.now())){
-      state.onlineError = 'You are muted and cannot chat.';
-      render();
-      return;
-    }
-    state.chatInput = '';
-    fbDb.collection('rooms').doc(state.roomCode).collection('messages').add({
-      uid: state.currentUser.uid,
-      name: state.currentUser.name,
-      text: text.slice(0, 300),
-      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    if(state.isBanned) return;
+
+    // Always re-check mute status from server before sending
+    fbDb.collection('users').doc(state.currentUser.uid).get().then(snap => {
+      if(snap.exists){
+        const d = snap.data();
+        const muted = !!(d.mutedUntil && d.mutedUntil > Date.now());
+        state.isMuted = muted;
+        state.currentUser.mutedUntil = d.mutedUntil || null;
+        if(muted){
+          state.onlineError = 'You are muted and cannot chat.';
+          render();
+          renderChatPanelDOM();
+          return;
+        }
+      }
+      state.chatInput = '';
+      fbDb.collection('rooms').doc(state.roomCode).collection('messages').add({
+        uid: state.currentUser.uid,
+        name: state.currentUser.name,
+        text: text.slice(0, 300),
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      renderChatPanelDOM();
+    }).catch(() => {
+      if(state.isMuted || (state.currentUser.mutedUntil && state.currentUser.mutedUntil > Date.now())){
+        state.onlineError = 'You are muted and cannot chat.';
+        render();
+        return;
+      }
+      state.chatInput = '';
+      fbDb.collection('rooms').doc(state.roomCode).collection('messages').add({
+        uid: state.currentUser.uid,
+        name: state.currentUser.name,
+        text: text.slice(0, 300),
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      renderChatPanelDOM();
     });
-    renderChatPanelDOM();
   }
 
   function toggleAdmin(show){
@@ -1759,10 +1816,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           <button class="btn ghost" style="width:auto; padding:8px 16px;" onclick="TI.toggleChat(false)">Close</button>
         </div>
         <div class="chat-messages" id="chatMessagesList">${msgs || '<p class="helper-note">No messages yet — say hi!</p>'}</div>
+        ${state.isMuted ? `<p class="helper-note" style="color:var(--red); text-align:center;">You are muted and cannot send messages.</p>` : `
         <div class="chat-input-row">
           <input class="input-field" type="text" id="chatInputField" value="${state.chatInput}" placeholder="Type a message..." onkeydown="if(event.key==='Enter'){TI.sendChatMessage(); document.getElementById('chatInputField').value='';}" onchange="TI.updateChatInput(this.value)" />
           <button class="btn solid" style="width:auto; padding:10px 18px;" onclick="TI.sendChatMessage(); document.getElementById('chatInputField').value='';">Send</button>
-        </div>
+        </div>`}
       </div>`;
     const list = document.getElementById('chatMessagesList');
     if(list) list.scrollTop = list.scrollHeight;
@@ -2879,10 +2937,34 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       </div>`;
   }
 
+  function renderBanned(){
+    return `
+      <div class="screen" style="justify-content:center; align-items:center; text-align:center;">
+        <div class="hand-icon" style="font-size:56px;">🚫</div>
+        <h1 style="font-size:clamp(32px,10vw,48px); color:var(--red); margin:10px 0;">YOU'RE BANNED!</h1>
+        <p class="sub" style="max-width:320px; margin:0 auto 16px;">${state.banMessage || 'You have been banned from Timer Imposter by an administrator.'}</p>
+        <p class="helper-note">You cannot play, join rooms, or use chat until an admin unbans you.</p>
+        <p class="helper-note" style="margin-top:20px;">If you think this is a mistake, contact the owner.</p>
+      </div>`;
+  }
+
   function render(){
     const app = document.getElementById('app');
     let html = '';
+
+    // Banned players are fully locked out of the app
+    if(state.isBanned){
+      html = renderBanned();
+      app.innerHTML = html;
+      const chatBtn = document.getElementById('chatToggleBtn');
+      if(chatBtn) chatBtn.style.display = 'none';
+      const adminBtn = document.getElementById('adminToggleBtn');
+      if(adminBtn) adminBtn.style.display = 'none';
+      return;
+    }
+
     switch(state.screen){
+      case 'banned': html = renderBanned(); break;
       case 'start': html = renderStart(); break;
       case 'setup': html = renderSetup(); break;
       case 'reveal': html = renderReveal(); break;
