@@ -553,7 +553,7 @@
 <div id="chatPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v23";
+const GAME_VERSION = "v24";
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -584,11 +584,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     onlineSecret: null,
     onlineImposterUid: null,
     onlineTargetMs: null,
-    onlineRoundPhase: 'ready',
+    onlineRoundPhase: 'ready', // local only for the active player: 'ready' | 'running' | 'stopped'
     onlineTurnOrder: [],
     onlineCurrentTurnIndex: 0,
     onlineTurnSecondsLeft: null,
     onlineLastTimerIndex: -1,
+    onlineTurnPhase: 'play', // shared from room: 'play' | 'review'
+    onlineReviewEndsAt: null,
+    onlineReviewSecondsLeft: null,
     showChat: false,
     showCloseRoomConfirm: false,
     showDeleteRoomConfirm: false,
@@ -667,7 +670,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   const AudioCtx = window.AudioContext || window.webkitAudioContext;
   let ctx = null;
   let turnTimerInterval = null;
-  const TURN_TIME_LIMIT = 15;
+  let reviewInterval = null;
+  const TURN_TIME_LIMIT = 20; // seconds the player has to start/stop before auto-skip
+  const REVIEW_SECONDS = 10;  // seconds everyone can look at the score before next turn
 
   function clearTurnTimer(){
     if(turnTimerInterval){ clearInterval(turnTimerInterval); turnTimerInterval = null; }
@@ -685,6 +690,27 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         render();
       }
     }, 1000);
+  }
+
+  function clearReviewTimer(){
+    if(reviewInterval){ clearInterval(reviewInterval); reviewInterval = null; }
+    state.onlineReviewSecondsLeft = null;
+  }
+  function startReviewTimer(endsAt){
+    clearReviewTimer();
+    function tick(){
+      const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+      state.onlineReviewSecondsLeft = left;
+      if(left <= 0){
+        clearReviewTimer();
+        // The player who just finished (or host) advances to the next turn
+        advanceToNextTurn();
+      } else {
+        render();
+      }
+    }
+    tick();
+    reviewInterval = setInterval(tick, 250);
   }
 
 
@@ -1191,13 +1217,25 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.onlineCrewWins = data.crewWins || false;
       state.onlineTurnOrder = data.turnOrder || [];
       state.onlineCurrentTurnIndex = data.currentTurnIndex || 0;
+      state.onlineTurnPhase = data.turnPhase || 'play';
+      state.onlineReviewEndsAt = data.reviewEndsAt || null;
 
       const myTurnNow = state.currentUser && state.onlineTurnOrder[state.onlineCurrentTurnIndex] === state.currentUser.uid;
-      if(data.status === 'reveal' && myTurnNow && state.onlineLastTimerIndex !== state.onlineCurrentTurnIndex){
+
+      // Start the 20s "you must take your turn" timer only for the active player in play phase
+      if(data.status === 'reveal' && data.turnPhase !== 'review' && myTurnNow && state.onlineLastTimerIndex !== state.onlineCurrentTurnIndex){
         state.onlineLastTimerIndex = state.onlineCurrentTurnIndex;
+        state.onlineRoundPhase = 'ready';
         startTurnTimer();
-      } else if(!myTurnNow || data.status !== 'reveal'){
+      } else if(!myTurnNow || data.status !== 'reveal' || data.turnPhase === 'review'){
         clearTurnTimer();
+      }
+
+      // Shared 10s review countdown for everyone
+      if(data.status === 'reveal' && data.turnPhase === 'review' && data.reviewEndsAt){
+        startReviewTimer(data.reviewEndsAt);
+      } else {
+        clearReviewTimer();
       }
 
       if(data.status === 'reveal' && !state.onlineSecret){
@@ -1208,6 +1246,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       
       if(state.screen === 'onlineLobby' && data.status === 'reveal'){
         state.screen = 'onlineReveal';
+      }
+      // After role reveal, everyone goes to the shared round screen
+      if(data.status === 'reveal' && (state.screen === 'onlineReveal' || state.screen === 'onlineLobby')){
+        // keep them on reveal until they tap Ready; then goToOnlineRound
       }
       if(data.status === 'voting' && state.screen !== 'onlineVoting' && state.screen !== 'onlineResults'){
         state.screen = 'onlineVoting';
@@ -1349,6 +1391,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     unsubscribeOnline();
     unsubscribeChat();
     clearTurnTimer();
+    clearReviewTimer();
     state.onlineLastTimerIndex = -1;
     state.roomCode = null;
     state.isHost = false;
@@ -1358,6 +1401,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.onlineImposterUid = null;
     state.onlineTargetMs = null;
     state.onlineRoundPhase = 'ready';
+    state.onlineTurnPhase = 'play';
+    state.onlineReviewEndsAt = null;
     state.onlineVotedFor = null;
     state.showChat = false;
     state.chatMessages = [];
@@ -1525,7 +1570,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         );
         batch.update(roomRef.collection('players').doc(p.uid), { time: null, submitted: false, votedFor: null });
       });
-      batch.update(roomRef, { status: 'reveal', turnOrder: turnOrder, currentTurnIndex: 0 });
+      batch.update(roomRef, {
+        status: 'reveal',
+        turnOrder: turnOrder,
+        currentTurnIndex: 0,
+        turnPhase: 'play',
+        reviewEndsAt: null
+      });
       roomRef.set({ _imposterUidPending: imposterUid, _targetMsPending: targetMs }, { merge: true });
       return batch.commit();
     }).catch(err => { state.onlineError = 'Could not start game: ' + err.message; render(); });
@@ -1533,45 +1584,80 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
   function onlineBigButtonTap(){
     const myTurn = state.onlineTurnOrder[state.onlineCurrentTurnIndex] === state.currentUser.uid;
-    if(!myTurn) return;
+    if(!myTurn || state.onlineTurnPhase === 'review') return;
+
+    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+    const playerRef = roomRef.collection('players').doc(state.currentUser.uid);
+
     if(state.onlineRoundPhase === 'ready'){
       clearTurnTimer();
       playSFX('start');
       vibrate(20);
       state.roundStart = performance.now();
       state.onlineRoundPhase = 'running';
+      // Tell everyone this player has started timing
+      playerRef.update({ timing: true, submitted: false }).catch(() => {});
       render();
     } else if(state.onlineRoundPhase === 'running'){
       playSFX('stop');
       vibrate([20,30,20]);
       const elapsed = performance.now() - state.roundStart;
       state.onlineRoundPhase = 'stopped';
-      const roomRef = fbDb.collection('rooms').doc(state.roomCode);
-      const newIndex = state.onlineCurrentTurnIndex + 1;
-      const roomUpdate = newIndex >= state.onlineTurnOrder.length
-        ? { currentTurnIndex: newIndex, status: 'voting' }
-        : { currentTurnIndex: newIndex };
-      roomRef.collection('players').doc(state.currentUser.uid).update({ time: elapsed, submitted: true, skipped: false })
-        .then(() => roomRef.update(roomUpdate));
+      const reviewEndsAt = Date.now() + (REVIEW_SECONDS * 1000);
+
+      // Save the time and switch room into shared review phase so everyone sees the score
+      playerRef.update({ time: elapsed, submitted: true, skipped: false, timing: false })
+        .then(() => roomRef.update({
+          turnPhase: 'review',
+          reviewEndsAt: reviewEndsAt
+        }));
       render();
     }
   }
 
   function onlineSkipTurn(){
     const myTurn = state.onlineTurnOrder[state.onlineCurrentTurnIndex] === state.currentUser.uid;
-    if(!myTurn) return;
+    if(!myTurn || state.onlineTurnPhase === 'review') return;
     clearTurnTimer();
     playSFX('click');
     vibrate(10);
     state.onlineRoundPhase = 'stopped';
     const roomRef = fbDb.collection('rooms').doc(state.roomCode);
-    const newIndex = state.onlineCurrentTurnIndex + 1;
-    const roomUpdate = newIndex >= state.onlineTurnOrder.length
-      ? { currentTurnIndex: newIndex, status: 'voting' }
-      : { currentTurnIndex: newIndex };
-    roomRef.collection('players').doc(state.currentUser.uid).update({ time: null, submitted: true, skipped: true })
-      .then(() => roomRef.update(roomUpdate));
+    const reviewEndsAt = Date.now() + (REVIEW_SECONDS * 1000);
+
+    roomRef.collection('players').doc(state.currentUser.uid).update({ time: null, submitted: true, skipped: true, timing: false })
+      .then(() => roomRef.update({
+        turnPhase: 'review',
+        reviewEndsAt: reviewEndsAt
+      }));
     render();
+  }
+
+  // Called when the 10s review countdown finishes — advance to next player or voting
+  function advanceToNextTurn(){
+    if(!fbReady || !state.roomCode) return;
+    // Only one client should advance (prefer the player who just played, or the host)
+    const justPlayedUid = state.onlineTurnOrder[state.onlineCurrentTurnIndex];
+    const iAmResponsible = (state.currentUser && state.currentUser.uid === justPlayedUid) || state.isHost;
+    if(!iAmResponsible) return;
+
+    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+    const newIndex = state.onlineCurrentTurnIndex + 1;
+
+    if(newIndex >= state.onlineTurnOrder.length){
+      roomRef.update({
+        currentTurnIndex: newIndex,
+        status: 'voting',
+        turnPhase: 'play',
+        reviewEndsAt: null
+      }).catch(() => {});
+    } else {
+      roomRef.update({
+        currentTurnIndex: newIndex,
+        turnPhase: 'play',
+        reviewEndsAt: null
+      }).catch(() => {});
+    }
   }
 
   function goToOnlineRound(){
@@ -1634,20 +1720,28 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function playAgainOnline(){
     if(!state.isHost) return;
     playSFX('click');
+    clearTurnTimer();
+    clearReviewTimer();
     state.onlineSecret = null;
     state.onlineRoundPhase = 'ready';
+    state.onlineTurnPhase = 'play';
     state.onlineVotedFor = null;
+    state.onlineLastTimerIndex = -1;
     const roomRef = fbDb.collection('rooms').doc(state.roomCode);
     roomRef.update({ 
         status: 'waiting', 
         imposterUid: firebase.firestore.FieldValue.delete(), 
         targetMs: firebase.firestore.FieldValue.delete(),
         suspectedUid: firebase.firestore.FieldValue.delete(),
-        crewWins: firebase.firestore.FieldValue.delete()
+        crewWins: firebase.firestore.FieldValue.delete(),
+        turnPhase: 'play',
+        reviewEndsAt: null,
+        currentTurnIndex: 0,
+        turnOrder: firebase.firestore.FieldValue.delete()
     });
     
     state.onlinePlayers.forEach(p => {
-        roomRef.collection('players').doc(p.uid).update({ votedFor: null, submitted: false, time: null });
+        roomRef.collection('players').doc(p.uid).update({ votedFor: null, submitted: false, time: null, timing: false, skipped: false });
     });
     
     state.screen = 'onlineLobby';
@@ -2191,36 +2285,53 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   function renderOnlineRound(){
-    const me = state.onlinePlayers.find(p => p.uid === state.currentUser.uid);
-    if(me && me.submitted){
-      const doneCount = state.onlinePlayers.filter(p => p.submitted).length;
+    const currentUid = state.onlineTurnOrder[state.onlineCurrentTurnIndex];
+    const currentPlayer = state.onlinePlayers.find(p => p.uid === currentUid);
+    const currentName = currentPlayer ? currentPlayer.name : 'Player';
+    const myTurn = state.currentUser && currentUid === state.currentUser.uid;
+    const isReview = state.onlineTurnPhase === 'review';
+    const turnNum = state.onlineCurrentTurnIndex + 1;
+    const totalTurns = state.onlineTurnOrder.length;
+
+    // ===== REVIEW PHASE: everyone sees the score + 10s countdown =====
+    if(isReview){
+      const timeText = currentPlayer
+        ? (currentPlayer.skipped ? 'SKIPPED' : (currentPlayer.time != null ? formatTime(currentPlayer.time) : '—'))
+        : '—';
+      const secs = state.onlineReviewSecondsLeft != null ? state.onlineReviewSecondsLeft : REVIEW_SECONDS;
       return `
         <div class="screen">
-          <div class="handoff-wrap">
-            <div class="eyebrow">Submitted</div>
-            <div class="player-name" style="font-size:32px;">Nice work!</div>
-            <p class="helper-note">${doneCount} / ${state.onlinePlayers.length} players have gone. Waiting for the rest...</p>
+          <div class="round-wrap">
+            <div class="round-progress">TURN ${turnNum} OF ${totalTurns} — ${currentName}</div>
+            <div class="player-name" style="font-size:28px; margin:0;">${currentName}'s time</div>
+            <div class="timer-display revealed">${timeText}</div>
+            <p class="helper-note" style="color:var(--amber); font-size:18px;">Next turn in ${secs}s</p>
             ${renderLiveTimesList()}
           </div>
         </div>`;
     }
 
-    const myTurn = state.onlineTurnOrder[state.onlineCurrentTurnIndex] === state.currentUser.uid;
+    // ===== PLAY PHASE =====
+    // Spectator view (not your turn)
     if(!myTurn){
-      const upNextUid = state.onlineTurnOrder[state.onlineCurrentTurnIndex];
-      const upNext = state.onlinePlayers.find(p => p.uid === upNextUid);
+      const isTiming = currentPlayer && currentPlayer.timing;
       return `
         <div class="screen">
-          <div class="handoff-wrap">
-            <div class="eyebrow">Waiting Your Turn</div>
-            <div class="hand-icon">⏳</div>
-            <div class="player-name" style="font-size:32px;">${upNext ? upNext.name + "'s turn" : 'Waiting...'}</div>
-            <p class="helper-note">The game picks the order automatically. You'll get your turn — hang tight.</p>
+          <div class="round-wrap">
+            <div class="round-progress">TURN ${turnNum} OF ${totalTurns}</div>
+            <div class="hand-icon">${isTiming ? '⏱' : '👆'}</div>
+            <div class="player-name" style="font-size:32px; margin:0 0 8px;">${currentName}'s turn</div>
+            ${isTiming
+              ? `<div class="timer-display hidden-val">••:••</div>
+                 <p class="helper-note">${currentName} is timing right now...</p>`
+              : `<p class="helper-note">Waiting for ${currentName} to start the timer...</p>`
+            }
             ${renderLiveTimesList()}
           </div>
         </div>`;
     }
 
+    // Active player view (your turn)
     let timerHtml, btnLabel, btnClass = '';
     if(state.onlineRoundPhase === 'ready'){
       timerHtml = `<div class="timer-display hidden-val">--:--</div>`;
@@ -2237,12 +2348,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     return `
       <div class="screen">
         <div class="round-wrap">
-          <div class="round-progress">YOUR TURN NOW</div>
+          <div class="round-progress">YOUR TURN — ${turnNum} OF ${totalTurns}</div>
           ${showCountdown ? `<p class="helper-note" style="color:var(--amber);">Auto-skip in ${state.onlineTurnSecondsLeft}s</p>` : ''}
           ${timerHtml}
           <button class="big-btn ${btnClass}" ${state.onlineRoundPhase==='stopped'?'disabled':''} onclick="TI.onlineBigButtonTap()">${btnLabel}</button>
           ${state.onlineRoundPhase === 'ready' ? `<button class="btn ghost" style="max-width:280px;" onclick="TI.onlineSkipTurn()">Skip My Turn</button>` : ''}
-          <p class="helper-note">Tap once to start, tap again to stop. The clock is hidden while running.</p>
+          <p class="helper-note">Tap once to start, tap again to stop. Everyone can see when you start and stop.</p>
         </div>
       </div>`;
   }
