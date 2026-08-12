@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v40";
+const GAME_VERSION = "v41";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -1492,8 +1492,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     fbDb.collection('rooms').where('hostUid', '==', state.currentUser.uid).get()
       .then(snap => {
         const batch = fbDb.batch();
-        snap.forEach(doc => { if(doc.data().status === 'waiting') batch.delete(doc.ref); });
-        return snap.empty ? Promise.resolve() : batch.commit();
+        let n = 0;
+        snap.forEach(doc => {
+          const d = doc.data();
+          // Only clear YOUR real waiting rooms — never wipe bot lobby rooms
+          if(d.status === 'waiting' && !d.botSimulated){ batch.delete(doc.ref); n++; }
+        });
+        return n === 0 ? Promise.resolve() : batch.commit();
       })
       .then(() => fbDb.collection('rooms').doc(code).set({
       hostUid: state.currentUser.uid,
@@ -2186,43 +2191,68 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function startLobbyBotSim(){
     if(!fbReady || !state.currentUser || !state.currentUser.isOwner) return;
     stopLobbyBotSim();
-    // Run every 4–7s with jitter inside
-    lobbySimTimer = setInterval(() => { tickLobbyBotSim(); }, 4500);
-    // Kick once soon so lobby isn't empty
-    setTimeout(() => tickLobbyBotSim(), 800);
+    lobbySimTimer = setInterval(() => { tickLobbyBotSim(); }, 3500);
+    // Seed a big batch immediately so lobby is never empty
+    setTimeout(() => { seedLobbyBotRooms(); }, 400);
+    setTimeout(() => { tickLobbyBotSim(); }, 1500);
+  }
+
+  async function seedLobbyBotRooms(){
+    if(!fbReady || !state.currentUser || !state.currentUser.isOwner) return;
+    if(state.screen !== 'onlineHome' && state.screen !== 'onlineCreate' && state.screen !== 'onlineJoinPrivate') return;
+    const existing = (state.publicRooms || []).filter(r => r.botSimulated).length;
+    // Aim for a lively lobby right away (15–40 rooms)
+    const want = 15 + Math.floor(Math.random() * 26);
+    const toCreate = Math.max(0, want - existing);
+    if(toCreate <= 0) return;
+    lobbySimBusy = true;
+    try {
+      // Create in parallel chunks so it fills fast
+      const chunk = Math.min(toCreate, 12);
+      const jobs = [];
+      for(let i = 0; i < chunk; i++) jobs.push(lobbyCreateBotRoom());
+      await Promise.all(jobs);
+    } catch(e){ console.warn('seed lobby', e); }
+    lobbySimBusy = false;
+    // Keep seeding if still low
+    const after = (state.publicRooms || []).filter(r => r.botSimulated).length;
+    if(after < 10) setTimeout(() => seedLobbyBotRooms(), 2000);
   }
 
   function tickLobbyBotSim(){
     if(lobbySimBusy) return;
     if(!fbReady || !state.currentUser || !state.currentUser.isOwner) return;
-    // Only while browsing online lists (not mid-game)
     if(state.screen !== 'onlineHome' && state.screen !== 'onlineCreate' && state.screen !== 'onlineJoinPrivate') return;
     lobbySimBusy = true;
 
     const botRooms = (state.publicRooms || []).filter(r => r.botSimulated);
-    const humanRooms = (state.publicRooms || []).filter(r => !r.botSimulated);
-    // Target density fluctuates: sometimes quiet, sometimes busy
+    const humanRooms = (state.publicRooms || []).filter(r => !r.botSimulated && r.hostUid !== (state.currentUser && state.currentUser.uid));
+    // Target density: usually many rooms, sometimes fewer, sometimes a lot
     const hourBump = Math.random();
-    const targetBotRooms = hourBump < 0.15 ? Math.floor(2 + Math.random() * 4)
-      : hourBump < 0.55 ? Math.floor(6 + Math.random() * 8)
-      : hourBump < 0.85 ? Math.floor(12 + Math.random() * 15)
-      : Math.floor(20 + Math.random() * 25); // rare busy spike
+    const targetBotRooms = hourBump < 0.12 ? Math.floor(8 + Math.random() * 8)
+      : hourBump < 0.5 ? Math.floor(18 + Math.random() * 20)
+      : hourBump < 0.85 ? Math.floor(35 + Math.random() * 30)
+      : Math.floor(55 + Math.random() * 45);
 
     const actions = [];
-    // Create rooms if under target
-    if(botRooms.length < targetBotRooms && Math.random() < 0.7){
+    if(botRooms.length < targetBotRooms){
       actions.push('create');
-      if(botRooms.length < targetBotRooms - 3 && Math.random() < 0.45) actions.push('create');
+      if(botRooms.length < targetBotRooms - 5) actions.push('create');
+      if(botRooms.length < targetBotRooms - 12 && Math.random() < 0.6) actions.push('create');
     }
-    // Delete some bot rooms
-    if(botRooms.length > 0 && (botRooms.length > targetBotRooms || Math.random() < 0.35)){
+    if(botRooms.length > 0 && (botRooms.length > targetBotRooms || Math.random() < 0.4)){
       actions.push('delete');
-      if(botRooms.length > targetBotRooms + 4 && Math.random() < 0.5) actions.push('delete');
+      if(botRooms.length > targetBotRooms + 8) actions.push('delete');
     }
-    // Join human public rooms
-    if(humanRooms.length > 0 && Math.random() < 0.4) actions.push('joinHuman');
-    // Join other bot rooms to fill them
-    if(botRooms.length > 0 && Math.random() < 0.35) actions.push('joinBot');
+    // Bots join human public rooms often
+    if(humanRooms.length > 0){
+      actions.push('joinHuman');
+      if(Math.random() < 0.5) actions.push('joinHuman');
+    }
+    if(botRooms.length > 0){
+      actions.push('joinBot');
+      if(Math.random() < 0.5) actions.push('joinBot');
+    }
 
     const run = async () => {
       try {
@@ -2239,15 +2269,18 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   async function lobbyCreateBotRoom(){
+    if(!state.currentUser) return;
     const code = genRoomCode();
     const maxPlayers = LOBBY_MAX_OPTS[Math.floor(Math.random() * LOBBY_MAX_OPTS.length)];
     const roomName = pickLobbyRoomName();
     const modes = ['fast', 'standard', 'marathon'];
     const clues = ['off', 'easy', 'normal', 'hard'];
+    // hostUid MUST be the signed-in owner or Firestore rules reject the write
+    const hostUid = state.currentUser.uid;
     const hostBotId = 'bot_host_' + code;
     const hostName = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
     await fbDb.collection('rooms').doc(code).set({
-      hostUid: hostBotId,
+      hostUid: hostUid,
       roomName: roomName,
       isPrivate: false,
       password: null,
@@ -2260,7 +2293,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       botSimulated: true,
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
-    // Host bot + maybe 0–2 friends already in
+    // Fake host player (bot) + 0–3 friends already in lobby
     await fbDb.collection('rooms').doc(code).collection('players').doc(hostBotId).set({
       name: hostName,
       photoURL: '',
@@ -2269,7 +2302,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       joined: firebase.firestore.FieldValue.serverTimestamp(),
       votedFor: null
     });
-    const extra = Math.floor(Math.random() * 3);
+    const extra = Math.floor(Math.random() * 4);
     for(let i = 0; i < extra; i++){
       const bid = 'bot_' + code + '_' + i + '_' + Math.floor(Math.random() * 999);
       const n = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
@@ -2287,7 +2320,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   async function lobbyDeleteRandomBotRoom(botRooms){
     if(!botRooms || !botRooms.length) return;
     const room = botRooms[Math.floor(Math.random() * botRooms.length)];
-    // Don't delete the room the owner is currently in
     if(state.roomCode && room.code === state.roomCode) return;
     try {
       const players = await fbDb.collection('rooms').doc(room.code).collection('players').get();
@@ -2301,14 +2333,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   async function lobbyBotJoinRoom(rooms){
     if(!rooms || !rooms.length) return;
     const room = rooms[Math.floor(Math.random() * rooms.length)];
+    // Never auto-join the room YOU are currently sitting in mid-game
     if(state.roomCode && room.code === state.roomCode) return;
     try {
       const playersSnap = await fbDb.collection('rooms').doc(room.code).collection('players').get();
       if(playersSnap.size >= (room.maxPlayers || 10)) return;
-      // Don't spam more than a few bots into one room
       let botCount = 0;
       playersSnap.forEach(d => { if(d.data().isBot) botCount++; });
-      if(botCount >= 4) return;
+      if(botCount >= 6) return;
       const botId = 'bot_j_' + Date.now() + '_' + Math.floor(Math.random() * 9999);
       const name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
       await fbDb.collection('rooms').doc(room.code).collection('players').doc(botId).set({
@@ -3265,7 +3297,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
   function renderOnlineHome(){
     const publicList = state.publicRooms.length > 0 ? state.publicRooms.map(r => {
-      const isMine = state.currentUser && r.hostUid === state.currentUser.uid;
+      const isMine = state.currentUser && r.hostUid === state.currentUser.uid && !r.botSimulated;
       return `
       <div class="result-row">
         <div>
