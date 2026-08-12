@@ -555,13 +555,49 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v42";
+const GAME_VERSION = "v44";
 const OWNER_EMAIL = "kobik8512@gmail.com";
-const BOT_NAMES = [
+const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
     'Harper','Jordan','Kai','Logan','Morgan','Parker','Reese','Skyler','Taylor','Avery',
-    'Cedar','Maple','Moss','Stone','Coral','Ember','Frost','Harbor','Indigo','Jasper'
+    'Cedar','Maple','Moss','Stone','Coral','Ember','Frost','Harbor','Indigo','Jasper',
+    'Nova','Orion','Phoenix','Raven','Shadow','Storm','Vale','Wolf','Zen','Axel',
+    'Brook','Cliff','Dawn','Echo','Flint','Grove','Hazel','Iris','Jade','Knox'
   ];
+  const BOT_PREFIXES = ['','Lil ','Big ','Silent ','Dark ','Lucky ','Fast ','Chill ','Pro ','Noob '];
+  const BOT_SUFFIXES = ['','YT','TTV','Pro','x','xx','99','07','HQ','GG','TV','Bot'];
+  // Keep BOT_NAMES alias for older call sites
+  const BOT_NAMES = BOT_CORE_NAMES;
+
+  function generateBotName(usedSet){
+    const used = usedSet || new Set();
+    for(let attempt = 0; attempt < 40; attempt++){
+      const core = BOT_CORE_NAMES[Math.floor(Math.random() * BOT_CORE_NAMES.length)];
+      const style = Math.random();
+      let name;
+      if(style < 0.35){
+        name = core;
+      } else if(style < 0.55){
+        name = core + Math.floor(10 + Math.random() * 89);
+      } else if(style < 0.7){
+        name = core + BOT_SUFFIXES[1 + Math.floor(Math.random() * (BOT_SUFFIXES.length - 1))];
+      } else if(style < 0.85){
+        const pre = BOT_PREFIXES[1 + Math.floor(Math.random() * (BOT_PREFIXES.length - 1))];
+        name = (pre + core).trim();
+      } else {
+        name = core + '_' + Math.floor(100 + Math.random() * 899);
+      }
+      if(!used.has(name.toLowerCase())) return name;
+    }
+    // Absolute fallback
+    return 'Player' + Math.floor(1000 + Math.random() * 8999);
+  }
+
+  function botAvatarUrl(name, botId){
+    // Unique cartoon avatar from name+id seed (no login, free CDN)
+    const seed = encodeURIComponent(String(name || botId || Math.random()).replace(/\s+/g, ''));
+    return 'https://api.dicebear.com/7.x/avataaars/svg?seed=' + seed + '&size=128';
+  }
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -609,6 +645,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     chatUnsub: null,
     chatInput: '',
     onlineMaxPlayers: 5,
+    onlineBotSimulated: false,
     onlineVotedFor: null,
     onlineCrewWins: false,
     onlineSuspectedUid: null,
@@ -1570,38 +1607,58 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const roomRef = fbDb.collection('rooms').doc(code);
     roomRef.get().then(doc => {
       if(!doc.exists){ state.onlineError = 'No room found.'; render(); return; }
-      if(doc.data().status !== 'waiting'){ state.onlineError = 'That room has already started.'; render(); return; }
+      const roomData = doc.data();
+      if(roomData.status !== 'waiting'){ state.onlineError = 'That room has already started.'; render(); return; }
 
-      return roomRef.collection('players').get().then(snap => {
-          if(snap.size >= (doc.data().maxPlayers || 10)){
+      return roomRef.collection('players').get().then(async snap => {
+          if(snap.size >= (roomData.maxPlayers || 10)){
               state.onlineError = 'This room is full!';
               render();
               return;
           }
           state.roomCode = code;
-          state.isHost = (doc.data().hostUid === state.currentUser.uid);
-          state.onlineMaxPlayers = doc.data().maxPlayers || 10;
+          state.onlineMaxPlayers = roomData.maxPlayers || 10;
+          state.onlineBotSimulated = !!roomData.botSimulated;
           state.onlineError = null;
-          return roomRef.collection('players').doc(state.currentUser.uid).set({
+
+          // Bot-hosted rooms: first human becomes host so they can start the game
+          // (bot hostUid was the site owner; guests otherwise can never start)
+          let amHost = (roomData.hostUid === state.currentUser.uid);
+          if(roomData.botSimulated && !amHost){
+            try {
+              await roomRef.update({ hostUid: state.currentUser.uid });
+              amHost = true;
+            } catch(e){ console.warn('claim bot host', e); }
+          }
+          state.isHost = amHost;
+
+          await roomRef.collection('players').doc(state.currentUser.uid).set({
             name: state.currentUser.name,
             photoURL: state.currentUser.photoURL || '',
             isOwner: !!state.currentUser.isOwner,
             joined: firebase.firestore.FieldValue.serverTimestamp(),
             votedFor: null
-          }).then(() => {
-            state.screen = 'onlineLobby';
-            subscribeToRoom(code);
-            render();
           });
+          state.screen = 'onlineLobby';
+          subscribeToRoom(code);
+          render();
+
+          // If room is already full after we joined, auto-start immediately
+          const afterSnap = await roomRef.collection('players').get();
+          if(roomData.botSimulated && afterSnap.size >= (roomData.maxPlayers || 10) && afterSnap.size >= 3){
+            try { await lobbyStartBotRoom(code, { ...roomData, hostUid: state.currentUser.uid }, afterSnap); }
+            catch(e){ console.warn('join autostart', e); }
+          }
       });
     }).catch(err => { state.onlineError = 'Could not join room: ' + err.message; render(); });
   }
 
   function subscribeToRoom(code){
     unsubscribeOnline();
-    // Keep lobby sim while waiting so bots can join YOUR room.
-    // It pauses itself once status leaves "waiting".
+    // Owner keeps global lobby sim (create/delete/join many rooms)
     if(state.currentUser && state.currentUser.isOwner) startLobbyBotSim();
+    // ANY host (including test accounts) fills their own waiting room with bots
+    startRoomFillSim();
     subscribeToChat(code);
     const roomRef = fbDb.collection('rooms').doc(code);
 
@@ -1612,6 +1669,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.onlineImposterUid = data.imposterUid || null;
       state.onlineTargetMs = data.targetMs || null;
       state.onlineMaxPlayers = data.maxPlayers || 10;
+      state.onlineBotSimulated = !!data.botSimulated;
       state.onlineSuspectedUid = data.suspectedUid || null;
       state.onlineCrewWins = data.crewWins || false;
       state.onlineTurnOrder = data.turnOrder || [];
@@ -2069,6 +2127,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       }).catch(() => {});
     }
 
+    stopRoomFillSim();
     unsubscribeOnline();
     unsubscribeChat();
     clearTurnTimer();
@@ -2122,7 +2181,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       });
   }
 
-  // ---- BOTS (Owner testing only) ----
+  // ---- BOTS (any host can add; owner also runs global lobby sim) ----
   let botActionTimers = [];
   function clearBotTimers(){
     botActionTimers.forEach(t => clearTimeout(t));
@@ -2131,7 +2190,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   function addBot(){
-    if(!fbReady || !state.roomCode || !state.currentUser || !state.currentUser.isOwner) return;
+    if(!fbReady || !state.roomCode || !state.currentUser) return;
+    if(!state.isHost && !state.currentUser.isOwner) return;
     if(state.onlinePlayers.length >= (state.onlineMaxPlayers || 10)){
       state.onlineError = 'Room is full.';
       render();
@@ -2139,17 +2199,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     }
     playSFX('click');
     const used = new Set(state.onlinePlayers.map(p => (p.name || '').toLowerCase()));
-    let name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
-    for(let i = 0; i < 30; i++){
-      const candidate = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
-      if(!used.has(candidate.toLowerCase())){ name = candidate; break; }
-    }
-    // If all names taken, add a number
-    if(used.has(name.toLowerCase())) name = name + Math.floor(10 + Math.random() * 89);
+    const name = generateBotName(used);
     const botId = 'bot_' + Date.now() + '_' + Math.floor(Math.random() * 9999);
     fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(botId).set({
       name: name,
-      photoURL: '',
+      photoURL: botAvatarUrl(name, botId),
       isBot: true,
       isOwner: false,
       joined: firebase.firestore.FieldValue.serverTimestamp(),
@@ -2191,6 +2245,70 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
   function stopLobbyBotSim(){
     if(lobbySimTimer){ clearInterval(lobbySimTimer); lobbySimTimer = null; }
+  }
+
+  // Fills the CURRENT waiting room with bots for ANY host (not only owner).
+  // This is what makes test accounts get bots joining their lobby.
+  let roomFillTimer = null;
+  let roomFillBusy = false;
+  function stopRoomFillSim(){
+    if(roomFillTimer){ clearInterval(roomFillTimer); roomFillTimer = null; }
+  }
+  let roomFillNextAt = 0;
+  function startRoomFillSim(){
+    stopRoomFillSim();
+    if(!fbReady || !state.currentUser) return;
+    // First bot arrives after 2–5s, then variable gaps
+    roomFillNextAt = Date.now() + 2000 + Math.random() * 3000;
+    roomFillTimer = setInterval(() => { tickRoomFill(); }, 800);
+  }
+  async function tickRoomFill(){
+    if(roomFillBusy) return;
+    if(!fbReady || !state.currentUser) return;
+    if(state.screen !== 'onlineLobby' || state.onlineStatus !== 'waiting' || !state.roomCode) return;
+
+    const maxP = state.onlineMaxPlayers || 10;
+    const count = (state.onlinePlayers || []).length;
+
+    // Full room: auto-start bot rooms (host already claimed on join)
+    if(count >= maxP && count >= 3){
+      roomFillBusy = true;
+      try {
+        const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+        const roomDoc = await roomRef.get();
+        if(roomDoc.exists){
+          const data = roomDoc.data();
+          if(data.status === 'waiting' && (data.botSimulated || state.isHost)){
+            if(state.isHost){
+              startOnlineGame();
+            } else if(data.botSimulated){
+              const playersSnap = await roomRef.collection('players').get();
+              await lobbyStartBotRoom(state.roomCode, data, playersSnap);
+            }
+          }
+        }
+      } catch(e){ console.warn('room fill autostart', e); }
+      roomFillBusy = false;
+      return;
+    }
+
+    // Host (any account) fills their waiting room with bots
+    if(!state.isHost && !state.currentUser.isOwner) return;
+    if(count >= maxP) return;
+
+    // Pace joins: sometimes fast (1.5–3s), sometimes slow (5–12s)
+    if(Date.now() < roomFillNextAt) return;
+    const gapRoll = Math.random();
+    const nextGap = gapRoll < 0.25 ? (1500 + Math.random() * 1500)
+      : gapRoll < 0.65 ? (3500 + Math.random() * 3500)
+      : (6000 + Math.random() * 6000);
+    roomFillNextAt = Date.now() + nextGap;
+
+    roomFillBusy = true;
+    try {
+      await lobbyBotJoinSpecific(state.roomCode);
+    } catch(e){ console.warn('room fill join', e); }
+    roomFillBusy = false;
   }
 
   function lobbySimAllowedScreen(){
@@ -2310,7 +2428,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const clues = ['off', 'easy', 'normal', 'hard'];
     const hostUid = state.currentUser.uid; // rules require real auth uid
     const hostBotId = 'bot_host_' + code;
-    const hostName = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+    const usedNames = new Set();
+    const hostName = generateBotName(usedNames);
+    usedNames.add(hostName.toLowerCase());
     await fbDb.collection('rooms').doc(code).set({
       hostUid: hostUid,
       roomName: roomName,
@@ -2327,7 +2447,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     });
     await fbDb.collection('rooms').doc(code).collection('players').doc(hostBotId).set({
       name: hostName,
-      photoURL: '',
+      photoURL: botAvatarUrl(hostName, hostBotId),
       isBot: true,
       isOwner: false,
       joined: firebase.firestore.FieldValue.serverTimestamp(),
@@ -2336,10 +2456,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const extra = Math.floor(Math.random() * 4);
     for(let i = 0; i < extra; i++){
       const bid = 'bot_' + code + '_' + i + '_' + Math.floor(Math.random() * 999);
-      const n = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+      const n = generateBotName(usedNames);
+      usedNames.add(n.toLowerCase());
       await fbDb.collection('rooms').doc(code).collection('players').doc(bid).set({
         name: n,
-        photoURL: '',
+        photoURL: botAvatarUrl(n, bid),
         isBot: true,
         isOwner: false,
         joined: firebase.firestore.FieldValue.serverTimestamp(),
@@ -2372,22 +2493,21 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       const playersSnap = await roomRef.collection('players').get();
       const maxP = room.maxPlayers || 10;
       if(playersSnap.size >= maxP){
-        // Full — if pure bot room, try auto start
         if(room.botSimulated) await lobbyStartBotRoom(code, room, playersSnap);
         return;
       }
+      const used = new Set();
+      playersSnap.forEach(d => { const n = (d.data().name || '').toLowerCase(); if(n) used.add(n); });
       const botId = 'bot_j_' + Date.now() + '_' + Math.floor(Math.random() * 9999);
-      const name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
-      // Variable join speed feel is from tick timing; write is instant
+      const name = generateBotName(used);
       await roomRef.collection('players').doc(botId).set({
         name: name,
-        photoURL: '',
+        photoURL: botAvatarUrl(name, botId),
         isBot: true,
         isOwner: false,
         joined: firebase.firestore.FieldValue.serverTimestamp(),
         votedFor: null
       });
-      // After join, check if now full for bot rooms
       if(room.botSimulated && playersSnap.size + 1 >= maxP){
         const refreshed = await roomRef.collection('players').get();
         await lobbyStartBotRoom(code, room, refreshed);
@@ -2443,14 +2563,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     }
   }
 
-  // Start a full bot-only room so it leaves the public "waiting" list
+  // Start a full bot-hosted room (botSimulated) so it leaves the public "waiting" list
+  // Works even if a human joined — as long as the room is marked botSimulated.
   async function lobbyStartBotRoom(code, roomData, playersSnap){
     try {
       const players = [];
       playersSnap.forEach(d => players.push({ uid: d.id, ...d.data() }));
       if(players.length < 3) return;
-      // Only auto-start pure bot rooms (don't force-start a human lobby)
-      if(players.some(p => !p.isBot)) return;
+      if(!roomData.botSimulated) return; // never force-start normal human-hosted rooms
 
       const roomRef = fbDb.collection('rooms').doc(code);
       const mode = roomData.mode || 'standard';
@@ -2754,7 +2874,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   function startOnlineGame(){
-    if(!state.isHost || !fbReady) return;
+    // Host OR anyone in a bot-simulated room can start
+    if(!fbReady) return;
+    if(!state.isHost && !state.onlineBotSimulated) return;
     if(state.onlinePlayers.length < 3){ state.onlineError = 'Need at least 3 players to start.'; render(); return; }
     playSFX('click');
     state.onlineError = null;
@@ -3590,7 +3712,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   function renderOnlineLobby(){
-    const canAddBot = state.currentUser && state.currentUser.isOwner && state.onlinePlayers.length < (state.onlineMaxPlayers || 10);
+    // Any host can add bots (not only site owner)
+    const canAddBot = state.currentUser && state.isHost && state.onlinePlayers.length < (state.onlineMaxPlayers || 10);
+    const canStart = (state.isHost || state.onlineBotSimulated) && state.onlinePlayers.length >= 3;
     const boxes = state.onlinePlayers.map(p => {
       const isMe = state.currentUser && p.uid === state.currentUser.uid;
       const canKick = state.isHost && !isMe;
@@ -3612,7 +3736,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         <div style="display:flex; flex-wrap:wrap; gap:14px; padding:14px 0;">${boxes}</div>
         <div class="spacer"></div>
         <div class="row-gap">
-          ${state.isHost ? `<button class="btn solid" onclick="TI.startOnlineGame()">Start Game (${state.onlinePlayers.length} joined)</button>` : `<p class="helper-note">Waiting for the host to start the game...</p>`}
+          ${canStart
+            ? `<button class="btn solid" onclick="TI.startOnlineGame()">Start Game (${state.onlinePlayers.length} joined)</button>`
+            : (state.isHost
+                ? `<button class="btn solid" onclick="TI.startOnlineGame()" style="opacity:.55;">Start Game (${state.onlinePlayers.length} joined)</button>`
+                : `<p class="helper-note">Waiting for the host to start the game...</p>`)}
           ${canAddBot ? `<button class="btn ghost" onclick="TI.addBot()">🤖 Add Bot</button>` : ''}
           <button class="btn ghost" onclick="TI.exitOnlineToMenu()">Leave Room</button>
         </div>
