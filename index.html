@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v35";
+const GAME_VERSION = "v36";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -751,7 +751,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       if(left <= 0){
         clearReviewTimer();
         lastReviewEndsAtStarted = null;
-        advanceToNextTurn();
+        // Only host advances — prevents two clients fighting over currentTurnIndex
+        if(state.isHost) advanceToNextTurn();
       } else {
         render();
       }
@@ -1604,21 +1605,31 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.onlineSuspectedUid = data.suspectedUid || null;
       state.onlineCrewWins = data.crewWins || false;
       state.onlineTurnOrder = data.turnOrder || [];
-      state.onlineCurrentTurnIndex = data.currentTurnIndex || 0;
 
-      // Don't let a lagging snapshot wipe an optimistic local review phase
+      // Sync turn index from server — detect change BEFORE writing it
+      const incomingIndex = data.currentTurnIndex || 0;
+      const indexChanged = incomingIndex !== state.onlineCurrentTurnIndex;
+      state.onlineCurrentTurnIndex = incomingIndex;
+
+      // Don't let a lagging snapshot wipe an optimistic local review phase —
+      // BUT only if we're still on the same turn index
       const incomingPhase = data.turnPhase || 'play';
-      const localReviewActive = state.onlineTurnPhase === 'review' && state.onlineReviewEndsAt && Date.now() < state.onlineReviewEndsAt;
-      if(incomingPhase === 'review'){
+      const localReviewActive = state.onlineTurnPhase === 'review' && state.onlineReviewEndsAt && Date.now() < state.onlineReviewEndsAt && !indexChanged;
+      if(incomingPhase === 'review' && (data.reviewForIndex == null || data.reviewForIndex === incomingIndex)){
         state.onlineTurnPhase = 'review';
         state.onlineReviewEndsAt = data.reviewEndsAt || state.onlineReviewEndsAt;
+      } else if(incomingPhase === 'play' || indexChanged){
+        state.onlineTurnPhase = 'play';
+        state.onlineReviewEndsAt = null;
+        if(state.onlineRoundPhase === 'stopped') state.onlineRoundPhase = 'ready';
+        if(indexChanged){
+          clearReviewTimer();
+          lastReviewEndsAtStarted = null;
+          state._botPlayingUid = null;
+        }
       } else if(!localReviewActive){
         state.onlineTurnPhase = incomingPhase;
         state.onlineReviewEndsAt = data.reviewEndsAt || null;
-        // Leaving review → clear local "stopped" so we don't stick on the same player
-        if(incomingPhase === 'play' && state.onlineRoundPhase === 'stopped'){
-          state.onlineRoundPhase = 'ready';
-        }
       }
 
       const myTurnNow = state.currentUser && state.onlineTurnOrder[state.onlineCurrentTurnIndex] === state.currentUser.uid;
@@ -2244,8 +2255,17 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         if(local){ local.time = elapsed; local.submitted = true; local.skipped = false; local.timing = false; }
         startReviewTimer(reviewEndsAt);
 
+        const botIndex = state.onlineCurrentTurnIndex;
         playerRef.update({ time: elapsed, submitted: true, skipped: false, timing: false })
-          .then(() => roomRef.update({ turnPhase: 'review', reviewEndsAt: reviewEndsAt }))
+          .then(() => fbDb.runTransaction(tx => tx.get(roomRef).then(doc => {
+            const d = doc.data() || {};
+            if(d.currentTurnIndex !== botIndex) return;
+            tx.update(roomRef, {
+              turnPhase: 'review',
+              reviewEndsAt: reviewEndsAt,
+              reviewForIndex: botIndex
+            });
+          })))
           .catch(() => {})
           .finally(() => { state._botPlayingUid = null; });
 
@@ -2460,12 +2480,27 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       if(me){ me.time = elapsed; me.submitted = true; me.skipped = false; me.timing = false; }
       startReviewTimer(reviewEndsAt);
 
-      // Save the time and switch room into shared review phase so everyone sees the score
+      // Save time + enter review only if this turn is still active (prevents late writes undoing advance)
+      const myIndex = state.onlineCurrentTurnIndex;
       playerRef.update({ time: elapsed, submitted: true, skipped: false, timing: false })
-        .then(() => roomRef.update({
-          turnPhase: 'review',
-          reviewEndsAt: reviewEndsAt
-        }))
+        .then(() => fbDb.runTransaction(tx => tx.get(roomRef).then(doc => {
+          const d = doc.data() || {};
+          // Don't overwrite if host already advanced past this turn
+          if(d.currentTurnIndex !== myIndex) return;
+          if(d.turnPhase === 'play' && d.currentTurnIndex === myIndex){
+            tx.update(roomRef, {
+              turnPhase: 'review',
+              reviewEndsAt: reviewEndsAt,
+              reviewForIndex: myIndex
+            });
+          } else if(d.turnPhase !== 'review' || d.reviewForIndex === myIndex){
+            tx.update(roomRef, {
+              turnPhase: 'review',
+              reviewEndsAt: reviewEndsAt,
+              reviewForIndex: myIndex
+            });
+          }
+        })))
         .catch(err => {
           state.onlineError = 'Could not submit time: ' + err.message;
           render();
@@ -2483,6 +2518,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.onlineRoundPhase = 'stopped';
     const roomRef = fbDb.collection('rooms').doc(state.roomCode);
     const reviewEndsAt = Date.now() + (REVIEW_SECONDS * 1000);
+    const myIndex = state.onlineCurrentTurnIndex;
 
     // Optimistic local update
     state.onlineTurnPhase = 'review';
@@ -2492,10 +2528,15 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     startReviewTimer(reviewEndsAt);
 
     roomRef.collection('players').doc(state.currentUser.uid).update({ time: null, submitted: true, skipped: true, timing: false })
-      .then(() => roomRef.update({
-        turnPhase: 'review',
-        reviewEndsAt: reviewEndsAt
-      }))
+      .then(() => fbDb.runTransaction(tx => tx.get(roomRef).then(doc => {
+        const d = doc.data() || {};
+        if(d.currentTurnIndex !== myIndex) return;
+        tx.update(roomRef, {
+          turnPhase: 'review',
+          reviewEndsAt: reviewEndsAt,
+          reviewForIndex: myIndex
+        });
+      })))
       .catch(err => {
         state.onlineError = 'Could not skip: ' + err.message;
         render();
@@ -2503,17 +2544,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     render();
   }
 
-  // Called when the 10s review countdown finishes — next unsubmitted player (bots included) or voting
+  // Called when the 10s review countdown finishes — HOST ONLY advances (avoids index fights)
   function advanceToNextTurn(){
     if(!fbReady || !state.roomCode) return;
+    if(!state.isHost) return; // critical: only host writes currentTurnIndex
     if(advancingTurn) return;
     if(state.onlineTurnPhase !== 'review' && state.onlineRoundPhase !== 'stopped') return;
 
     const justPlayedUid = state.onlineTurnOrder[state.onlineCurrentTurnIndex];
-    // Host OR the player who just finished can advance (so it never stalls)
-    const iAmResponsible = (state.currentUser && state.currentUser.uid === justPlayedUid) || state.isHost;
-    if(!iAmResponsible) return;
-
     advancingTurn = true;
 
     // Always mark the player who just finished as submitted locally
@@ -2541,14 +2579,15 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       roomRef.update({
         status: 'voting',
         turnPhase: 'play',
-        reviewEndsAt: null
+        reviewEndsAt: null,
+        reviewForIndex: null
       }).then(() => { advancingTurn = false; })
         .catch(() => { advancingTurn = false; });
       render();
       return;
     }
 
-    // Prefer next in turn order after current, else first remaining (includes bots)
+    // Prefer next in turn order after current (includes bots)
     let nextUid = null;
     const order = state.onlineTurnOrder || [];
     for(let step = 1; step <= order.length; step++){
@@ -2556,22 +2595,22 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       const uid = order[idx];
       if(remainingUids.indexOf(uid) !== -1){ nextUid = uid; break; }
     }
-    if(!nextUid) nextUid = remainingUids[Math.floor(Math.random() * remainingUids.length)];
+    if(!nextUid) nextUid = remainingUids[0];
 
     let newIndex = order.indexOf(nextUid);
     if(newIndex < 0) newIndex = 0;
 
     state.onlineCurrentTurnIndex = newIndex;
-    state.onlineLastTimerIndex = -1; // allow turn timer / bot driver for the new player
+    state.onlineLastTimerIndex = -1;
     state._botPlayingUid = null;
 
     roomRef.update({
       currentTurnIndex: newIndex,
       turnPhase: 'play',
-      reviewEndsAt: null
+      reviewEndsAt: null,
+      reviewForIndex: null
     }).then(() => {
       advancingTurn = false;
-      // If next is a bot, start their turn right away
       setTimeout(() => { maybePlayBotTurn(); }, 250);
     }).catch(() => {
       advancingTurn = false;
