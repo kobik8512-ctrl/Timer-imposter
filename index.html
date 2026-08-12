@@ -555,9 +555,13 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v32";
+const GAME_VERSION = "v33";
 const OWNER_EMAIL = "kobik8512@gmail.com";
-const BOT_NAMES = ['Nova','Pixel','Echo','Zap','Mango','Orbit','Nudge','Clank','Ziggy','Quark','Blip','Flux'];
+const BOT_NAMES = [
+    'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
+    'Harper','Jordan','Kai','Logan','Morgan','Parker','Reese','Skyler','Taylor','Avery',
+    'Cedar','Maple','Moss','Stone','Coral','Ember','Frost','Harbor','Indigo','Jasper'
+  ];
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -1687,18 +1691,36 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     });
   }
 
+  const botVoteStarted = new Set();
   function maybeBotVotes(){
     if(!state.currentUser) return;
     if(!state.isHost && !state.currentUser.isOwner) return;
-    if(state.onlineStatus !== 'voting') return;
+    if(state.onlineStatus !== 'voting'){
+      botVoteStarted.clear();
+      return;
+    }
     if(!state.roomCode) return;
     state.onlinePlayers.forEach(p => {
       if(!p.isBot || p.votedFor) return;
+      if(botVoteStarted.has(p.uid)) return;
+      botVoteStarted.add(p.uid);
       const others = state.onlinePlayers.filter(x => x.uid !== p.uid);
       if(!others.length) return;
-      const pick = others[Math.floor(Math.random() * others.length)].uid;
-      fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(p.uid)
-        .update({ votedFor: pick }).catch(() => {});
+      // Prefer voting for someone whose time looks farthest from the pack (simple heuristic)
+      let pick = others[Math.floor(Math.random() * others.length)].uid;
+      const withTimes = others.filter(x => x.time != null && !x.skipped);
+      if(withTimes.length >= 2){
+        const avg = withTimes.reduce((s, x) => s + x.time, 0) / withTimes.length;
+        withTimes.sort((a, b) => Math.abs(b.time - avg) - Math.abs(a.time - avg));
+        // 70% chance to vote the biggest outlier, else random
+        if(Math.random() < 0.7) pick = withTimes[0].uid;
+      }
+      const delay = 600 + Math.random() * 1800;
+      const t = setTimeout(() => {
+        fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(p.uid)
+          .update({ votedFor: pick }).catch(() => {});
+      }, delay);
+      botActionTimers.push(t);
     });
   }
 
@@ -2045,11 +2067,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     }
     playSFX('click');
     const used = new Set(state.onlinePlayers.map(p => (p.name || '').toLowerCase()));
-    let name = 'Bot';
-    for(let i = 0; i < 20; i++){
-      const candidate = 'Bot ' + BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+    let name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+    for(let i = 0; i < 30; i++){
+      const candidate = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
       if(!used.has(candidate.toLowerCase())){ name = candidate; break; }
     }
+    // If all names taken, add a number
+    if(used.has(name.toLowerCase())) name = name + Math.floor(10 + Math.random() * 89);
     const botId = 'bot_' + Date.now() + '_' + Math.floor(Math.random() * 9999);
     fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(botId).set({
       name: name,
@@ -3060,7 +3084,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       return `
       <div style="display:flex; flex-direction:column; align-items:center; gap:6px; width:90px; position:relative;">
         ${avatarHtml(p, 52)}
-        <div style="font-size:12px; text-align:center; color:var(--ink); word-break:break-word;">${formatPlayerName(p)}${isMe ? ' (you)' : ''}${p.isBot ? ' 🤖' : ''}</div>
+        <div style="font-size:12px; text-align:center; color:var(--ink); word-break:break-word;">${formatPlayerName(p)}${isMe ? ' (you)' : ''}</div>
         ${canKick ? `<button onclick="TI.kickPlayer('${p.uid}')" style="margin-top:2px; background:transparent; border:1px solid var(--red); color:var(--red); border-radius:4px; font-size:10px; padding:2px 8px; cursor:pointer; font-family:'Space Mono',monospace; letter-spacing:.05em; text-transform:uppercase;">Kick</button>` : ''}
       </div>`;
     }).join('');
