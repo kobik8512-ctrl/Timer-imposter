@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v44";
+const GAME_VERSION = "v45";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -1642,13 +1642,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           state.screen = 'onlineLobby';
           subscribeToRoom(code);
           render();
-
-          // If room is already full after we joined, auto-start immediately
-          const afterSnap = await roomRef.collection('players').get();
-          if(roomData.botSimulated && afterSnap.size >= (roomData.maxPlayers || 10) && afterSnap.size >= 3){
-            try { await lobbyStartBotRoom(code, { ...roomData, hostUid: state.currentUser.uid }, afterSnap); }
-            catch(e){ console.warn('join autostart', e); }
-          }
+          // Bot rooms: do NOT start instantly on join — delayed start is handled by room fill sim
       });
     }).catch(err => { state.onlineError = 'Could not join room: ' + err.message; render(); });
   }
@@ -2255,11 +2249,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     if(roomFillTimer){ clearInterval(roomFillTimer); roomFillTimer = null; }
   }
   let roomFillNextAt = 0;
+  let botRoomStartAt = 0; // scheduled auto-start for bot-hosted rooms only
   function startRoomFillSim(){
     stopRoomFillSim();
     if(!fbReady || !state.currentUser) return;
-    // First bot arrives after 2–5s, then variable gaps
     roomFillNextAt = Date.now() + 2000 + Math.random() * 3000;
+    botRoomStartAt = 0;
     roomFillTimer = setInterval(() => { tickRoomFill(); }, 800);
   }
   async function tickRoomFill(){
@@ -2269,34 +2264,55 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
     const maxP = state.onlineMaxPlayers || 10;
     const count = (state.onlinePlayers || []).length;
+    const isBotRoom = !!state.onlineBotSimulated;
 
-    // Full room: auto-start bot rooms (host already claimed on join)
-    if(count >= maxP && count >= 3){
-      roomFillBusy = true;
-      try {
-        const roomRef = fbDb.collection('rooms').doc(state.roomCode);
-        const roomDoc = await roomRef.get();
-        if(roomDoc.exists){
-          const data = roomDoc.data();
-          if(data.status === 'waiting' && (data.botSimulated || state.isHost)){
+    // HUMAN rooms: never auto-start. Host must click Start.
+    // BOT rooms: once we have enough players (>=3), schedule start in 3–10s.
+    if(isBotRoom && count >= 3 && state.onlineStatus === 'waiting'){
+      if(!botRoomStartAt){
+        botRoomStartAt = Date.now() + 3000 + Math.random() * 7000; // 3–10s
+      }
+      if(Date.now() >= botRoomStartAt){
+        roomFillBusy = true;
+        try {
+          const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+          const roomDoc = await roomRef.get();
+          if(roomDoc.exists && roomDoc.data().status === 'waiting'){
             if(state.isHost){
               startOnlineGame();
-            } else if(data.botSimulated){
+            } else {
               const playersSnap = await roomRef.collection('players').get();
-              await lobbyStartBotRoom(state.roomCode, data, playersSnap);
+              await lobbyStartBotRoom(state.roomCode, roomDoc.data(), playersSnap);
             }
           }
-        }
-      } catch(e){ console.warn('room fill autostart', e); }
+        } catch(e){ console.warn('bot room delayed start', e); }
+        roomFillBusy = false;
+        return;
+      }
+    }
+
+    // Who may add/leave bots in THIS lobby?
+    // - Host of any room
+    // - Anyone sitting in a bot-simulated room (so bots keep joining after a human enters)
+    // - Site owner
+    const canFill = state.isHost || isBotRoom || (state.currentUser && state.currentUser.isOwner);
+    if(!canFill) return;
+
+    // Random bot LEAVE (not below 1 bot, keep lobby alive)
+    if(count >= 3 && Math.random() < 0.18){
+      roomFillBusy = true;
+      try {
+        await lobbyBotLeaveFromCode(state.roomCode);
+      } catch(e){ console.warn('room fill leave', e); }
       roomFillBusy = false;
+      // Leaving can push us under 3 — clear scheduled start so it re-arms later
+      if(isBotRoom && (state.onlinePlayers || []).length < 3) botRoomStartAt = 0;
       return;
     }
 
-    // Host (any account) fills their waiting room with bots
-    if(!state.isHost && !state.currentUser.isOwner) return;
     if(count >= maxP) return;
 
-    // Pace joins: sometimes fast (1.5–3s), sometimes slow (5–12s)
+    // Pace joins: sometimes fast, sometimes slow
     if(Date.now() < roomFillNextAt) return;
     const gapRoll = Math.random();
     const nextGap = gapRoll < 0.25 ? (1500 + Math.random() * 1500)
@@ -2309,6 +2325,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       await lobbyBotJoinSpecific(state.roomCode);
     } catch(e){ console.warn('room fill join', e); }
     roomFillBusy = false;
+  }
+
+  async function lobbyBotLeaveFromCode(code){
+    if(!code) return;
+    try {
+      const playersSnap = await fbDb.collection('rooms').doc(code).collection('players').get();
+      const bots = [];
+      playersSnap.forEach(d => {
+        if(d.data().isBot) bots.push(d.id);
+      });
+      if(bots.length <= 1) return; // keep at least one bot presence
+      const leaveId = bots[Math.floor(Math.random() * bots.length)];
+      await fbDb.collection('rooms').doc(code).collection('players').doc(leaveId).delete();
+    } catch(e){ console.warn('bot leave code', e); }
   }
 
   function lobbySimAllowedScreen(){
@@ -2508,7 +2538,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         joined: firebase.firestore.FieldValue.serverTimestamp(),
         votedFor: null
       });
-      if(room.botSimulated && playersSnap.size + 1 >= maxP){
+      // Background bot rooms (you're not inside): start when full.
+      // Room you're sitting in: delayed 3–10s start is handled by tickRoomFill.
+      if(room.botSimulated && playersSnap.size + 1 >= maxP && state.roomCode !== code){
         const refreshed = await roomRef.collection('players').get();
         await lobbyStartBotRoom(code, room, refreshed);
       }
