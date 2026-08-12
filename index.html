@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v29";
+const GAME_VERSION = "v30";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 
 const firebaseConfig = {
@@ -1589,24 +1589,33 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       state.onlineCrewWins = data.crewWins || false;
       state.onlineTurnOrder = data.turnOrder || [];
       state.onlineCurrentTurnIndex = data.currentTurnIndex || 0;
-      state.onlineTurnPhase = data.turnPhase || 'play';
-      state.onlineReviewEndsAt = data.reviewEndsAt || null;
+
+      // Don't let a lagging snapshot wipe an optimistic local review phase
+      const incomingPhase = data.turnPhase || 'play';
+      const localReviewActive = state.onlineTurnPhase === 'review' && state.onlineReviewEndsAt && Date.now() < state.onlineReviewEndsAt;
+      if(incomingPhase === 'review'){
+        state.onlineTurnPhase = 'review';
+        state.onlineReviewEndsAt = data.reviewEndsAt || state.onlineReviewEndsAt;
+      } else if(!localReviewActive){
+        state.onlineTurnPhase = incomingPhase;
+        state.onlineReviewEndsAt = data.reviewEndsAt || null;
+      }
 
       const myTurnNow = state.currentUser && state.onlineTurnOrder[state.onlineCurrentTurnIndex] === state.currentUser.uid;
 
       // Start the 20s "you must take your turn" timer only for the active player in play phase
-      if(data.status === 'reveal' && data.turnPhase !== 'review' && myTurnNow && state.onlineLastTimerIndex !== state.onlineCurrentTurnIndex){
+      if(data.status === 'reveal' && state.onlineTurnPhase !== 'review' && myTurnNow && state.onlineLastTimerIndex !== state.onlineCurrentTurnIndex){
         state.onlineLastTimerIndex = state.onlineCurrentTurnIndex;
         state.onlineRoundPhase = 'ready';
         startTurnTimer();
-      } else if(!myTurnNow || data.status !== 'reveal' || data.turnPhase === 'review'){
+      } else if(!myTurnNow || data.status !== 'reveal' || state.onlineTurnPhase === 'review'){
         clearTurnTimer();
       }
 
       // Shared 10s review countdown for everyone
-      if(data.status === 'reveal' && data.turnPhase === 'review' && data.reviewEndsAt){
-        startReviewTimer(data.reviewEndsAt);
-      } else {
+      if(data.status === 'reveal' && state.onlineTurnPhase === 'review' && state.onlineReviewEndsAt){
+        startReviewTimer(state.onlineReviewEndsAt);
+      } else if(state.onlineTurnPhase !== 'review'){
         clearReviewTimer();
       }
 
@@ -2938,7 +2947,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const currentNameHtml = currentPlayer ? formatPlayerName(currentPlayer) : 'Player';
     const currentNamePlain = currentPlayer ? currentPlayer.name : 'Player';
     const myTurn = state.currentUser && currentUid === state.currentUser.uid;
-    const isReview = state.onlineTurnPhase === 'review';
+    // Treat local "stopped" as review so we never show the dead Submitted/DONE screen
+    const isReview = state.onlineTurnPhase === 'review' || state.onlineRoundPhase === 'stopped';
     const turnNum = state.onlineCurrentTurnIndex + 1;
     const totalTurns = state.onlineTurnOrder.length;
 
