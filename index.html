@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v36";
+const GAME_VERSION = "v37";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -741,7 +741,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     if(!endsAt) return;
     // Don't restart the same countdown over and over (causes the "back to 10s" glitch)
     if(reviewInterval && lastReviewEndsAtStarted === endsAt) return;
-    lastReviewEndsAtStarted = endsAt;
     clearReviewTimer();
     lastReviewEndsAtStarted = endsAt;
 
@@ -751,8 +750,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       if(left <= 0){
         clearReviewTimer();
         lastReviewEndsAtStarted = null;
-        // Only host advances — prevents two clients fighting over currentTurnIndex
-        if(state.isHost) advanceToNextTurn();
+        // Anyone can try; transaction makes sure only one advance wins
+        advanceToNextTurn();
       } else {
         render();
       }
@@ -1646,8 +1645,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       // Shared 10s review countdown for everyone
       if(data.status === 'reveal' && state.onlineTurnPhase === 'review' && state.onlineReviewEndsAt){
         startReviewTimer(state.onlineReviewEndsAt);
-        // Host safety net: if review is overdue, force advance (fixes stuck 10s loop)
-        if(state.isHost && Date.now() > state.onlineReviewEndsAt + 800){
+        // Safety net: if review is overdue, force advance (any client, transaction-safe)
+        if(Date.now() > state.onlineReviewEndsAt + 500){
           advanceToNextTurn();
         }
       } else if(state.onlineTurnPhase !== 'review'){
@@ -2544,81 +2543,95 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     render();
   }
 
-  // Called when the 10s review countdown finishes — HOST ONLY advances (avoids index fights)
+  // Called when the 10s review countdown finishes.
+  // Any client may call this; a Firestore transaction ensures only ONE advance happens.
   function advanceToNextTurn(){
     if(!fbReady || !state.roomCode) return;
-    if(!state.isHost) return; // critical: only host writes currentTurnIndex
     if(advancingTurn) return;
-    if(state.onlineTurnPhase !== 'review' && state.onlineRoundPhase !== 'stopped') return;
-
-    const justPlayedUid = state.onlineTurnOrder[state.onlineCurrentTurnIndex];
     advancingTurn = true;
 
-    // Always mark the player who just finished as submitted locally
-    const justPlayed = state.onlinePlayers.find(p => p.uid === justPlayedUid);
+    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+    const localIndex = state.onlineCurrentTurnIndex;
+    const localOrder = (state.onlineTurnOrder || []).slice();
+    const localPlayers = (state.onlinePlayers || []).slice();
+
+    // Mark just-played as submitted locally
+    const justPlayedUid = localOrder[localIndex];
+    const justPlayed = localPlayers.find(p => p.uid === justPlayedUid);
     if(justPlayed){ justPlayed.submitted = true; justPlayed.timing = false; }
 
-    // Optimistic local unlock
-    state.onlineTurnPhase = 'play';
-    state.onlineReviewEndsAt = null;
-    state.onlineRoundPhase = 'ready';
-    state.onlineReviewSecondsLeft = null;
-    clearReviewTimer();
-    lastReviewEndsAtStarted = null;
+    fbDb.runTransaction(tx => {
+      return tx.get(roomRef).then(doc => {
+        if(!doc.exists) return;
+        const d = doc.data() || {};
 
-    // Anyone who has not submitted — never include the person who just played
-    const remainingUids = (state.onlineTurnOrder || []).filter(uid => {
-      if(uid === justPlayedUid) return false;
-      const p = state.onlinePlayers.find(x => x.uid === uid);
-      return p && !p.submitted;
-    });
+        // Already advanced by someone else
+        if(d.turnPhase !== 'review') return;
+        // Stale: room moved on
+        if(d.reviewForIndex != null && d.reviewForIndex !== (d.currentTurnIndex || 0)) return;
 
-    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+        const order = d.turnOrder || localOrder;
+        const curIndex = d.currentTurnIndex || 0;
+        const justUid = order[curIndex];
 
-    if(remainingUids.length === 0){
-      roomRef.update({
-        status: 'voting',
-        turnPhase: 'play',
-        reviewEndsAt: null,
-        reviewForIndex: null
-      }).then(() => { advancingTurn = false; })
-        .catch(() => { advancingTurn = false; });
-      render();
-      return;
-    }
+        // Build remaining from live player submitted flags
+        // Use local player list (most up to date on this client)
+        const remainingUids = order.filter(uid => {
+          if(uid === justUid) return false;
+          const p = localPlayers.find(x => x.uid === uid);
+          return p && !p.submitted;
+        });
 
-    // Prefer next in turn order after current (includes bots)
-    let nextUid = null;
-    const order = state.onlineTurnOrder || [];
-    for(let step = 1; step <= order.length; step++){
-      const idx = (state.onlineCurrentTurnIndex + step) % order.length;
-      const uid = order[idx];
-      if(remainingUids.indexOf(uid) !== -1){ nextUid = uid; break; }
-    }
-    if(!nextUid) nextUid = remainingUids[0];
+        if(remainingUids.length === 0){
+          tx.update(roomRef, {
+            status: 'voting',
+            turnPhase: 'play',
+            reviewEndsAt: null,
+            reviewForIndex: null
+          });
+          return;
+        }
 
-    let newIndex = order.indexOf(nextUid);
-    if(newIndex < 0) newIndex = 0;
+        let nextUid = null;
+        for(let step = 1; step <= order.length; step++){
+          const idx = (curIndex + step) % order.length;
+          const uid = order[idx];
+          if(remainingUids.indexOf(uid) !== -1){ nextUid = uid; break; }
+        }
+        if(!nextUid) nextUid = remainingUids[0];
+        let newIndex = order.indexOf(nextUid);
+        if(newIndex < 0) newIndex = 0;
 
-    state.onlineCurrentTurnIndex = newIndex;
-    state.onlineLastTimerIndex = -1;
-    state._botPlayingUid = null;
-
-    roomRef.update({
-      currentTurnIndex: newIndex,
-      turnPhase: 'play',
-      reviewEndsAt: null,
-      reviewForIndex: null
+        tx.update(roomRef, {
+          currentTurnIndex: newIndex,
+          turnPhase: 'play',
+          reviewEndsAt: null,
+          reviewForIndex: null
+        });
+      });
     }).then(() => {
       advancingTurn = false;
-      setTimeout(() => { maybePlayBotTurn(); }, 250);
-    }).catch(() => {
+      // Local unlock (snapshot will confirm)
+      state.onlineTurnPhase = 'play';
+      state.onlineReviewEndsAt = null;
+      state.onlineRoundPhase = 'ready';
+      state.onlineReviewSecondsLeft = null;
+      state.onlineLastTimerIndex = -1;
+      state._botPlayingUid = null;
+      clearReviewTimer();
+      lastReviewEndsAtStarted = null;
+      render();
+      setTimeout(() => { maybePlayBotTurn(); }, 300);
+    }).catch(err => {
+      console.warn('advanceToNextTurn failed', err);
       advancingTurn = false;
-      setTimeout(() => { maybePlayBotTurn(); }, 250);
+      // Retry once shortly if still in review
+      setTimeout(() => {
+        if(state.onlineTurnPhase === 'review' || state.onlineRoundPhase === 'stopped'){
+          advanceToNextTurn();
+        }
+      }, 1000);
     });
-
-    render();
-    setTimeout(() => { maybePlayBotTurn(); }, 300);
   }
 
   function goToOnlineRound(){
