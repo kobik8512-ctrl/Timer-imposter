@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v34";
+const GAME_VERSION = "v35";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -1615,6 +1615,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       } else if(!localReviewActive){
         state.onlineTurnPhase = incomingPhase;
         state.onlineReviewEndsAt = data.reviewEndsAt || null;
+        // Leaving review → clear local "stopped" so we don't stick on the same player
+        if(incomingPhase === 'play' && state.onlineRoundPhase === 'stopped'){
+          state.onlineRoundPhase = 'ready';
+        }
       }
 
       const myTurnNow = state.currentUser && state.onlineTurnOrder[state.onlineCurrentTurnIndex] === state.currentUser.uid;
@@ -2499,20 +2503,24 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     render();
   }
 
-  // Called when the 10s review countdown finishes — pick a random remaining player or go to voting
+  // Called when the 10s review countdown finishes — next unsubmitted player (bots included) or voting
   function advanceToNextTurn(){
     if(!fbReady || !state.roomCode) return;
     if(advancingTurn) return;
     if(state.onlineTurnPhase !== 'review' && state.onlineRoundPhase !== 'stopped') return;
 
-    // Prefer host or the player who just finished so we don't get double-updates
     const justPlayedUid = state.onlineTurnOrder[state.onlineCurrentTurnIndex];
+    // Host OR the player who just finished can advance (so it never stalls)
     const iAmResponsible = (state.currentUser && state.currentUser.uid === justPlayedUid) || state.isHost;
     if(!iAmResponsible) return;
 
     advancingTurn = true;
 
-    // Optimistic local unlock so UI leaves the review screen immediately
+    // Always mark the player who just finished as submitted locally
+    const justPlayed = state.onlinePlayers.find(p => p.uid === justPlayedUid);
+    if(justPlayed){ justPlayed.submitted = true; justPlayed.timing = false; }
+
+    // Optimistic local unlock
     state.onlineTurnPhase = 'play';
     state.onlineReviewEndsAt = null;
     state.onlineRoundPhase = 'ready';
@@ -2520,8 +2528,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     clearReviewTimer();
     lastReviewEndsAtStarted = null;
 
-    // Remaining players who have not submitted yet
+    // Anyone who has not submitted — never include the person who just played
     const remainingUids = (state.onlineTurnOrder || []).filter(uid => {
+      if(uid === justPlayedUid) return false;
       const p = state.onlinePlayers.find(x => x.uid === uid);
       return p && !p.submitted;
     });
@@ -2539,22 +2548,38 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       return;
     }
 
-    // Randomly choose the next player among those who still need to go
-    const nextUid = remainingUids[Math.floor(Math.random() * remainingUids.length)];
-    let newIndex = state.onlineTurnOrder.indexOf(nextUid);
+    // Prefer next in turn order after current, else first remaining (includes bots)
+    let nextUid = null;
+    const order = state.onlineTurnOrder || [];
+    for(let step = 1; step <= order.length; step++){
+      const idx = (state.onlineCurrentTurnIndex + step) % order.length;
+      const uid = order[idx];
+      if(remainingUids.indexOf(uid) !== -1){ nextUid = uid; break; }
+    }
+    if(!nextUid) nextUid = remainingUids[Math.floor(Math.random() * remainingUids.length)];
+
+    let newIndex = order.indexOf(nextUid);
     if(newIndex < 0) newIndex = 0;
 
     state.onlineCurrentTurnIndex = newIndex;
-    state.onlineLastTimerIndex = -1; // allow turn timer to start for the new player
+    state.onlineLastTimerIndex = -1; // allow turn timer / bot driver for the new player
+    state._botPlayingUid = null;
 
     roomRef.update({
       currentTurnIndex: newIndex,
       turnPhase: 'play',
       reviewEndsAt: null
-    }).then(() => { advancingTurn = false; })
-      .catch(() => { advancingTurn = false; });
+    }).then(() => {
+      advancingTurn = false;
+      // If next is a bot, start their turn right away
+      setTimeout(() => { maybePlayBotTurn(); }, 250);
+    }).catch(() => {
+      advancingTurn = false;
+      setTimeout(() => { maybePlayBotTurn(); }, 250);
+    });
 
     render();
+    setTimeout(() => { maybePlayBotTurn(); }, 300);
   }
 
   function goToOnlineRound(){
