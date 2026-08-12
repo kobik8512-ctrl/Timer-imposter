@@ -555,8 +555,9 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v31";
+const GAME_VERSION = "v32";
 const OWNER_EMAIL = "kobik8512@gmail.com";
+const BOT_NAMES = ['Nova','Pixel','Echo','Zap','Mango','Orbit','Nudge','Clank','Ziggy','Quark','Blip','Flux'];
 
 const firebaseConfig = {
   apiKey: "AIzaSyA_dIpy_Nu9F_gTIJ_P6w4yysCgabusLFw",
@@ -1635,6 +1636,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         lastReviewEndsAtStarted = null;
       }
 
+      maybePlayBotTurn();
+
       if(data.status === 'reveal' && !state.onlineSecret){
         fbDb.collection('rooms').doc(code).collection('secrets').doc(state.currentUser.uid).get().then(sdoc => {
           if(sdoc.exists){ state.onlineSecret = sdoc.data(); render(); }
@@ -1675,10 +1678,27 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       }
       
       if(state.isHost && state.onlineStatus === 'voting'){
+          maybeBotVotes();
           const allVoted = state.onlinePlayers.every(p => p.votedFor);
           if(allVoted) tallyOnlineVotes();
       }
+      maybePlayBotTurn();
       render();
+    });
+  }
+
+  function maybeBotVotes(){
+    if(!state.currentUser) return;
+    if(!state.isHost && !state.currentUser.isOwner) return;
+    if(state.onlineStatus !== 'voting') return;
+    if(!state.roomCode) return;
+    state.onlinePlayers.forEach(p => {
+      if(!p.isBot || p.votedFor) return;
+      const others = state.onlinePlayers.filter(x => x.uid !== p.uid);
+      if(!others.length) return;
+      const pick = others[Math.floor(Math.random() * others.length)].uid;
+      fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(p.uid)
+        .update({ votedFor: pick }).catch(() => {});
     });
   }
 
@@ -1959,6 +1979,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     unsubscribeChat();
     clearTurnTimer();
     clearReviewTimer();
+    clearBotTimers();
     state.onlineLastTimerIndex = -1;
     state.roomCode = null;
     state.isHost = false;
@@ -2005,6 +2026,118 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         state.onlineError = 'Could not kick player: ' + err.message;
         render();
       });
+  }
+
+  // ---- BOTS (Owner testing only) ----
+  let botActionTimers = [];
+  function clearBotTimers(){
+    botActionTimers.forEach(t => clearTimeout(t));
+    botActionTimers = [];
+    state._botPlayingUid = null;
+  }
+
+  function addBot(){
+    if(!fbReady || !state.roomCode || !state.currentUser || !state.currentUser.isOwner) return;
+    if(state.onlinePlayers.length >= (state.onlineMaxPlayers || 10)){
+      state.onlineError = 'Room is full.';
+      render();
+      return;
+    }
+    playSFX('click');
+    const used = new Set(state.onlinePlayers.map(p => (p.name || '').toLowerCase()));
+    let name = 'Bot';
+    for(let i = 0; i < 20; i++){
+      const candidate = 'Bot ' + BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+      if(!used.has(candidate.toLowerCase())){ name = candidate; break; }
+    }
+    const botId = 'bot_' + Date.now() + '_' + Math.floor(Math.random() * 9999);
+    fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(botId).set({
+      name: name,
+      photoURL: '',
+      isBot: true,
+      isOwner: false,
+      joined: firebase.firestore.FieldValue.serverTimestamp(),
+      votedFor: null,
+      submitted: false,
+      time: null,
+      timing: false
+    }).then(() => {
+      return fbDb.collection('rooms').doc(state.roomCode).collection('messages').add({
+        uid: 'system',
+        name: 'System',
+        text: name + ' joined the room',
+        createdAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    }).catch(err => {
+      state.onlineError = 'Could not add bot: ' + err.message;
+      render();
+    });
+  }
+
+  function botRandomTimeMs(){
+    // Aim near target if we know it, otherwise use mode ranges
+    let target = state.onlineTargetMs;
+    if(target == null && state.onlineSecret && state.onlineSecret.targetMs){
+      target = state.onlineSecret.targetMs;
+    }
+    if(target != null){
+      // bots are decent but not perfect: ±0.15s to ±1.2s
+      const err = (Math.random() * 1050 + 150) * (Math.random() < 0.5 ? -1 : 1);
+      return Math.max(200, target + err);
+    }
+    // fallback by mode
+    let minS = 1, maxS = 9;
+    if(state.mode === 'fast'){ minS = 0.5; maxS = 3; }
+    if(state.mode === 'marathon'){ minS = 10; maxS = 20; }
+    return (minS + Math.random() * (maxS - minS)) * 1000;
+  }
+
+  function maybePlayBotTurn(){
+    // Only host/owner drives bots so we don't get double actions
+    if(!state.currentUser) return;
+    if(!state.isHost && !state.currentUser.isOwner) return;
+    if(state.onlineStatus !== 'reveal') return;
+    if(state.onlineTurnPhase === 'review') return;
+    if(!state.onlineTurnOrder || !state.onlineTurnOrder.length) return;
+
+    const uid = state.onlineTurnOrder[state.onlineCurrentTurnIndex];
+    const bot = state.onlinePlayers.find(p => p.uid === uid);
+    if(!bot || !bot.isBot || bot.submitted) return;
+    if(state._botPlayingUid === uid) return;
+    state._botPlayingUid = uid;
+
+    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+    const playerRef = roomRef.collection('players').doc(uid);
+
+    // Short delay then show "timing..."
+    const t1 = setTimeout(() => {
+      playerRef.update({ timing: true, submitted: false }).catch(() => {});
+    }, 800 + Math.random() * 700);
+
+    // Then stop with a random time and enter review
+    const thinkMs = 1800 + Math.random() * 3200;
+    const t2 = setTimeout(() => {
+      const elapsed = botRandomTimeMs();
+      const reviewEndsAt = Date.now() + (REVIEW_SECONDS * 1000);
+
+      // Local optimistic review so host UI doesn't lag
+      state.onlineTurnPhase = 'review';
+      state.onlineReviewEndsAt = reviewEndsAt;
+      state.onlineRoundPhase = 'stopped';
+      const local = state.onlinePlayers.find(p => p.uid === uid);
+      if(local){ local.time = elapsed; local.submitted = true; local.skipped = false; local.timing = false; }
+      startReviewTimer(reviewEndsAt);
+
+      playerRef.update({ time: elapsed, submitted: true, skipped: false, timing: false })
+        .then(() => roomRef.update({ turnPhase: 'review', reviewEndsAt: reviewEndsAt }))
+        .catch(() => {})
+        .finally(() => {
+          state._botPlayingUid = null;
+        });
+      render();
+    }, 800 + thinkMs);
+
+    botActionTimers.push(t1, t2);
   }
 
   function toggleCloseRoomConfirm(show){
@@ -2920,13 +3053,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   function renderOnlineLobby(){
+    const canAddBot = state.currentUser && state.currentUser.isOwner && state.onlinePlayers.length < (state.onlineMaxPlayers || 10);
     const boxes = state.onlinePlayers.map(p => {
       const isMe = state.currentUser && p.uid === state.currentUser.uid;
       const canKick = state.isHost && !isMe;
       return `
       <div style="display:flex; flex-direction:column; align-items:center; gap:6px; width:90px; position:relative;">
         ${avatarHtml(p, 52)}
-        <div style="font-size:12px; text-align:center; color:var(--ink); word-break:break-word;">${formatPlayerName(p)}${isMe ? ' (you)' : ''}</div>
+        <div style="font-size:12px; text-align:center; color:var(--ink); word-break:break-word;">${formatPlayerName(p)}${isMe ? ' (you)' : ''}${p.isBot ? ' 🤖' : ''}</div>
         ${canKick ? `<button onclick="TI.kickPlayer('${p.uid}')" style="margin-top:2px; background:transparent; border:1px solid var(--red); color:var(--red); border-radius:4px; font-size:10px; padding:2px 8px; cursor:pointer; font-family:'Space Mono',monospace; letter-spacing:.05em; text-transform:uppercase;">Kick</button>` : ''}
       </div>`;
     }).join('');
@@ -2942,6 +3076,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         <div class="spacer"></div>
         <div class="row-gap">
           ${state.isHost ? `<button class="btn solid" onclick="TI.startOnlineGame()">Start Game (${state.onlinePlayers.length} joined)</button>` : `<p class="helper-note">Waiting for the host to start the game...</p>`}
+          ${canAddBot ? `<button class="btn ghost" onclick="TI.addBot()">🤖 Add Bot</button>` : ''}
           <button class="btn ghost" onclick="TI.exitOnlineToMenu()">Leave Room</button>
         </div>
       </div>
@@ -3213,7 +3348,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     goOnlineHome, goOnlineCreate, updateCreateField, changeCreateMax, submitCreateRoom,
     joinPublicRoom, goOnlineJoinPrivate, updateJoinField, submitJoinPrivate,
     exitOnlineToMenu, startOnlineGame, toggleCloseRoomConfirm, confirmCloseRoom,
-    toggleDeleteRoomConfirm, confirmDeleteRoom, kickPlayer,
+    toggleDeleteRoomConfirm, confirmDeleteRoom, kickPlayer, addBot,
     goToOnlineRound, onlineBigButtonTap, onlineSkipTurn, goToOnlineWaiting, startOnlineVoting, castOnlineVote, playAgainOnline,
     toggleChat, updateChatInput, sendChatMessage,
     toggleAdmin, updateAdminField, runAdminCommand
