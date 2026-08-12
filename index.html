@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v33";
+const GAME_VERSION = "v34";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -1700,28 +1700,51 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       return;
     }
     if(!state.roomCode) return;
+    const target = resolveTargetMs();
     state.onlinePlayers.forEach(p => {
       if(!p.isBot || p.votedFor) return;
       if(botVoteStarted.has(p.uid)) return;
       botVoteStarted.add(p.uid);
       const others = state.onlinePlayers.filter(x => x.uid !== p.uid);
       if(!others.length) return;
-      // Prefer voting for someone whose time looks farthest from the pack (simple heuristic)
+
+      // Vote like a human: suspect farthest from target (or from group average)
       let pick = others[Math.floor(Math.random() * others.length)].uid;
       const withTimes = others.filter(x => x.time != null && !x.skipped);
-      if(withTimes.length >= 2){
-        const avg = withTimes.reduce((s, x) => s + x.time, 0) / withTimes.length;
-        withTimes.sort((a, b) => Math.abs(b.time - avg) - Math.abs(a.time - avg));
-        // 70% chance to vote the biggest outlier, else random
-        if(Math.random() < 0.7) pick = withTimes[0].uid;
+      if(withTimes.length >= 1){
+        if(target != null){
+          withTimes.sort((a, b) => Math.abs(b.time - target) - Math.abs(a.time - target));
+        } else {
+          const avg = withTimes.reduce((s, x) => s + x.time, 0) / withTimes.length;
+          withTimes.sort((a, b) => Math.abs(b.time - avg) - Math.abs(a.time - avg));
+        }
+        // Crew-like: usually vote the outlier; sometimes second place; rarely random
+        const roll = Math.random();
+        if(roll < 0.65) pick = withTimes[0].uid;
+        else if(roll < 0.85 && withTimes[1]) pick = withTimes[1].uid;
+        // else keep random pick
       }
-      const delay = 600 + Math.random() * 1800;
-      const t = setTimeout(() => {
-        fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(p.uid)
-          .update({ votedFor: pick }).catch(() => {});
-      }, delay);
-      botActionTimers.push(t);
+
+      // Imposter bot sometimes votes randomly to avoid looking smart
+      roomRefSecretsIsImposter(p.uid).then(isImp => {
+        if(isImp && Math.random() < 0.45){
+          pick = others[Math.floor(Math.random() * others.length)].uid;
+        }
+        const delay = 700 + Math.random() * 2500;
+        const t = setTimeout(() => {
+          fbDb.collection('rooms').doc(state.roomCode).collection('players').doc(p.uid)
+            .update({ votedFor: pick }).catch(() => {});
+          botMaybeChat(p.uid, p.name, BOT_LINES_VOTE, 0.35);
+        }, delay);
+        botActionTimers.push(t);
+      });
     });
+  }
+
+  function roomRefSecretsIsImposter(uid){
+    return fbDb.collection('rooms').doc(state.roomCode).collection('secrets').doc(uid).get()
+      .then(s => s.exists && !!s.data().isImposter)
+      .catch(() => false);
   }
 
   function unsubscribeOnline(){
@@ -2086,34 +2109,94 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       time: null,
       timing: false
     }).then(() => {
-      return fbDb.collection('rooms').doc(state.roomCode).collection('messages').add({
-        uid: 'system',
-        name: 'System',
-        text: name + ' joined the room',
-        createdAt: firebase.firestore.FieldValue.serverTimestamp()
-      });
+      // Chat like a person joining — no "bot joined" system spam
+      botMaybeChat(botId, name, BOT_LINES_JOIN, 0.95);
+      // Sometimes a second lobby line
+      const t = setTimeout(() => botMaybeChat(botId, name, BOT_LINES_LOBBY, 0.55), 2500 + Math.random() * 4000);
+      botActionTimers.push(t);
     }).catch(err => {
       state.onlineError = 'Could not add bot: ' + err.message;
       render();
     });
   }
 
-  function botRandomTimeMs(){
-    // Aim near target if we know it, otherwise use mode ranges
-    let target = state.onlineTargetMs;
-    if(target == null && state.onlineSecret && state.onlineSecret.targetMs){
-      target = state.onlineSecret.targetMs;
-    }
-    if(target != null){
-      // bots are decent but not perfect: ±0.15s to ±1.2s
-      const err = (Math.random() * 1050 + 150) * (Math.random() < 0.5 ? -1 : 1);
-      return Math.max(200, target + err);
-    }
-    // fallback by mode
+  function modeTimeRangeMs(){
     let minS = 1, maxS = 9;
     if(state.mode === 'fast'){ minS = 0.5; maxS = 3; }
     if(state.mode === 'marathon'){ minS = 10; maxS = 20; }
-    return (minS + Math.random() * (maxS - minS)) * 1000;
+    return { min: minS * 1000, max: maxS * 1000 };
+  }
+
+  function resolveTargetMs(){
+    if(state.onlineTargetMs != null) return state.onlineTargetMs;
+    if(state.onlineSecret && state.onlineSecret.targetMs != null) return state.onlineSecret.targetMs;
+    return null;
+  }
+
+  // Crew: try to hit the real target. Imposter: guess from clue / wider miss.
+  function botRandomTimeMs(isImposter, clue, knownTarget){
+    const target = knownTarget != null ? knownTarget : resolveTargetMs();
+    const range = modeTimeRangeMs();
+
+    if(isImposter){
+      // Try to use clue text like a real imposter
+      if(clue && /between\s+(\d+(?:\.\d+)?)s\s+and\s+(\d+(?:\.\d+)?)s/i.test(clue)){
+        const m = clue.match(/between\s+(\d+(?:\.\d+)?)s\s+and\s+(\d+(?:\.\d+)?)s/i);
+        const lo = parseFloat(m[1]) * 1000;
+        const hi = parseFloat(m[2]) * 1000;
+        return Math.max(200, lo + Math.random() * Math.max(100, hi - lo));
+      }
+      if(clue && /close to\s+(\d+)/i.test(clue)){
+        const m = clue.match(/close to\s+(\d+)/i);
+        const center = parseInt(m[1], 10) * 1000;
+        const err = (Math.random() * 1800 + 200) * (Math.random() < 0.5 ? -1 : 1);
+        return Math.max(200, center + err);
+      }
+      // No useful clue — wild guess in mode range (often looks off)
+      return range.min + Math.random() * (range.max - range.min);
+    }
+
+    // Crew bot — aim near real target from their secret
+    if(target != null){
+      // Usually accurate (80–450ms), sometimes a bit worse
+      const tight = Math.random() < 0.75;
+      const errMag = tight ? (80 + Math.random() * 370) : (400 + Math.random() * 900);
+      const err = errMag * (Math.random() < 0.5 ? -1 : 1);
+      return Math.max(200, target + err);
+    }
+    // Don't know target — still stay in mode range
+    return range.min + Math.random() * (range.max - range.min);
+  }
+
+  function botSendChat(uid, name, text){
+    if(!fbReady || !state.roomCode || !text) return;
+    fbDb.collection('rooms').doc(state.roomCode).collection('messages').add({
+      uid: uid,
+      name: name,
+      text: text,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    }).catch(() => {});
+  }
+
+  const BOT_LINES_JOIN = [
+    'hi', 'hey', 'hello', 'hey everyone', "let's play", 'hi guys', 'yo', 'ready when you are', 'lets go'
+  ];
+  const BOT_LINES_LOBBY = [
+    'we need more people', 'im ready', 'start whenever', 'anyone else joining?', 'lets play', 'hi', 'ok'
+  ];
+  const BOT_LINES_REVIEW = [
+    'nice', 'close', 'hmm', 'ok', 'interesting', 'sus', 'that was close', 'gg', 'wait what', 'okay'
+  ];
+  const BOT_LINES_VOTE = [
+    'i think its them', 'not sure', 'hmm tough one', 'looking at the times', 'maybe', 'idk'
+  ];
+
+  function botMaybeChat(uid, name, pool, chance){
+    if(Math.random() > chance) return;
+    const text = pool[Math.floor(Math.random() * pool.length)];
+    const delay = 400 + Math.random() * 2200;
+    const t = setTimeout(() => botSendChat(uid, name, text), delay);
+    botActionTimers.push(t);
   }
 
   function maybePlayBotTurn(){
@@ -2133,35 +2216,44 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const roomRef = fbDb.collection('rooms').doc(state.roomCode);
     const playerRef = roomRef.collection('players').doc(uid);
 
-    // Short delay then show "timing..."
-    const t1 = setTimeout(() => {
-      playerRef.update({ timing: true, submitted: false }).catch(() => {});
-    }, 800 + Math.random() * 700);
+    // Load bot secret so imposter bots can play from the clue
+    roomRef.collection('secrets').doc(uid).get().then(sdoc => {
+      const secret = sdoc.exists ? sdoc.data() : {};
+      const isImposter = !!secret.isImposter;
+      const clue = secret.clue || null;
 
-    // Then stop with a random time and enter review
-    const thinkMs = 1800 + Math.random() * 3200;
-    const t2 = setTimeout(() => {
-      const elapsed = botRandomTimeMs();
-      const reviewEndsAt = Date.now() + (REVIEW_SECONDS * 1000);
+      // Short delay then show "timing..."
+      const t1 = setTimeout(() => {
+        playerRef.update({ timing: true, submitted: false }).catch(() => {});
+      }, 700 + Math.random() * 900);
 
-      // Local optimistic review so host UI doesn't lag
-      state.onlineTurnPhase = 'review';
-      state.onlineReviewEndsAt = reviewEndsAt;
-      state.onlineRoundPhase = 'stopped';
-      const local = state.onlinePlayers.find(p => p.uid === uid);
-      if(local){ local.time = elapsed; local.submitted = true; local.skipped = false; local.timing = false; }
-      startReviewTimer(reviewEndsAt);
+      // Think time, then stop
+      const thinkMs = 1600 + Math.random() * 3400;
+      const t2 = setTimeout(() => {
+        const elapsed = botRandomTimeMs(isImposter, clue, secret.targetMs);
+        const reviewEndsAt = Date.now() + (REVIEW_SECONDS * 1000);
 
-      playerRef.update({ time: elapsed, submitted: true, skipped: false, timing: false })
-        .then(() => roomRef.update({ turnPhase: 'review', reviewEndsAt: reviewEndsAt }))
-        .catch(() => {})
-        .finally(() => {
-          state._botPlayingUid = null;
-        });
-      render();
-    }, 800 + thinkMs);
+        state.onlineTurnPhase = 'review';
+        state.onlineReviewEndsAt = reviewEndsAt;
+        state.onlineRoundPhase = 'stopped';
+        const local = state.onlinePlayers.find(p => p.uid === uid);
+        if(local){ local.time = elapsed; local.submitted = true; local.skipped = false; local.timing = false; }
+        startReviewTimer(reviewEndsAt);
 
-    botActionTimers.push(t1, t2);
+        playerRef.update({ time: elapsed, submitted: true, skipped: false, timing: false })
+          .then(() => roomRef.update({ turnPhase: 'review', reviewEndsAt: reviewEndsAt }))
+          .catch(() => {})
+          .finally(() => { state._botPlayingUid = null; });
+
+        // Occasional human-like chat after their turn
+        botMaybeChat(uid, bot.name, BOT_LINES_REVIEW, 0.45);
+        render();
+      }, 700 + thinkMs);
+
+      botActionTimers.push(t1, t2);
+    }).catch(() => {
+      state._botPlayingUid = null;
+    });
   }
 
   function toggleCloseRoomConfirm(show){
