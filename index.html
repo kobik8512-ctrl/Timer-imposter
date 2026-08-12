@@ -555,9 +555,8 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v38";
+const GAME_VERSION = "v39";
 const OWNER_EMAIL = "kobik8512@gmail.com";
-const ADMIN_EMAIL = "globalgioli@gmail.com";
 const BOT_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
     'Harper','Jordan','Kai','Logan','Morgan','Parker','Reese','Skyler','Taylor','Avery',
@@ -677,8 +676,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             name: user.displayName || 'Player',
             photoURL: user.photoURL || '',
             email: (user.email || '').toLowerCase(),
-            isOwner: emailIsOwner(user.email),
-            isAdmin: emailIsAdmin(user.email)
+            isOwner: emailIsOwner(user.email)
           };
           loadSavedProfile();
           ensureUserDoc().catch(() => {});
@@ -697,8 +695,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             name: u.displayName || 'Player',
             photoURL: u.photoURL || '',
             email: (u.email || '').toLowerCase(),
-            isOwner: emailIsOwner(u.email),
-            isAdmin: emailIsAdmin(u.email)
+            isOwner: emailIsOwner(u.email)
           };
           state.authSettled = true;
           render();
@@ -754,8 +751,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       if(left <= 0){
         clearReviewTimer();
         lastReviewEndsAtStarted = null;
-        // Anyone can try; transaction makes sure only one advance wins
-        advanceToNextTurn();
+        // HOST ONLY advances — stops multi-client turn races
+        if(state.isHost) advanceToNextTurn();
       } else {
         render();
       }
@@ -825,7 +822,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
   function avatarHtml(p, size){
     size = size || 40;
-    const borderColor = p.isOwner ? 'var(--amber)' : (p.isAdmin ? '#5b9dff' : 'var(--line)');
+    const borderColor = p.isOwner ? 'var(--amber)' : 'var(--line)';
     if(p.photoURL){
       return `<img src="${p.photoURL}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;border:2px solid ${borderColor};" onerror="this.style.display='none';this.nextElementSibling.style.display='flex';" /><div style="display:none;width:${size}px;height:${size}px;border-radius:50%;background:var(--green-dim);color:var(--ink);align-items:center;justify-content:center;font-weight:700;">${(p.name||'?')[0].toUpperCase()}</div>`;
     }
@@ -838,16 +835,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     if(p && p.isOwner){
       return `<span style="color:var(--amber);">[Owner]</span> <span style="color:var(--amber);">${name}</span>`;
     }
-    if(p && p.isAdmin){
-      return `<span style="color:#5b9dff;">[Admin]</span> <span style="color:#5b9dff;">${name}</span>`;
-    }
     return name;
   }
   function emailIsOwner(email){ return (email || '').toLowerCase() === OWNER_EMAIL; }
-  function emailIsAdmin(email){
-    const e = (email || '').toLowerCase();
-    return e === ADMIN_EMAIL || e === OWNER_EMAIL;
-  }
 
   function generateTargetAndClue(){
     let minS = 1, maxS = 9;
@@ -964,8 +954,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         name: u.displayName || 'Player',
         photoURL: u.photoURL || '',
         email: (u.email || '').toLowerCase(),
-        isOwner: emailIsOwner(u.email),
-        isAdmin: emailIsAdmin(u.email)
+        isOwner: emailIsOwner(u.email)
       };
       loadSavedProfile();
       state.signInBlocked = false;
@@ -1522,7 +1511,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         name: state.currentUser.name,
         photoURL: state.currentUser.photoURL || '',
         isOwner: !!state.currentUser.isOwner,
-        isAdmin: !!state.currentUser.isAdmin,
         joined: firebase.firestore.FieldValue.serverTimestamp(),
         votedFor: null
       });
@@ -1592,7 +1580,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             name: state.currentUser.name,
             photoURL: state.currentUser.photoURL || '',
             isOwner: !!state.currentUser.isOwner,
-            isAdmin: !!state.currentUser.isAdmin,
             joined: firebase.firestore.FieldValue.serverTimestamp(),
             votedFor: null
           }).then(() => {
@@ -1661,22 +1648,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       // Shared 10s review countdown for everyone
       if(data.status === 'reveal' && state.onlineTurnPhase === 'review' && state.onlineReviewEndsAt){
         startReviewTimer(state.onlineReviewEndsAt);
-        // Safety net: if review is overdue, force advance
-        if(Date.now() > state.onlineReviewEndsAt + 400){
+        // Host safety: if review is overdue by 1.5s, force advance once
+        if(state.isHost && Date.now() > state.onlineReviewEndsAt + 1500 && !advancingTurn){
           advanceToNextTurn();
         }
       } else if(state.onlineTurnPhase !== 'review'){
         clearReviewTimer();
         lastReviewEndsAtStarted = null;
-      }
-
-      // Stuck on a player who already submitted → force next turn
-      if(data.status === 'reveal' && state.onlineTurnPhase === 'play' && !advancingTurn){
-        const curUid = state.onlineTurnOrder[state.onlineCurrentTurnIndex];
-        const curP = state.onlinePlayers.find(p => p.uid === curUid);
-        if(curP && curP.submitted){
-          setTimeout(() => { if(!advancingTurn) advanceToNextTurn(); }, 350);
-        }
       }
 
       maybePlayBotTurn();
@@ -2552,10 +2530,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     render();
   }
 
-  // Called when the 10s review countdown finishes.
-  // Sequential next player. lastPlayedUid is never picked again.
+  // HOST ONLY. Sequential next unsubmitted player. No races.
   function advanceToNextTurn(){
     if(!fbReady || !state.roomCode) return;
+    if(!state.isHost) return; // critical — only host writes turn index
     if(advancingTurn) return;
     advancingTurn = true;
 
@@ -2563,87 +2541,58 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const order = (state.onlineTurnOrder || []).slice();
     const curIndex = state.onlineCurrentTurnIndex || 0;
     const justUid = order[curIndex];
-    const lastPlayed = state.onlineLastPlayedUid || justUid;
 
     // Mark just-played submitted locally
     const justPlayed = state.onlinePlayers.find(p => p.uid === justUid);
     if(justPlayed){ justPlayed.submitted = true; justPlayed.timing = false; }
 
-    // Next unsubmitted player AFTER current, wrapping; never lastPlayed
+    // Next unsubmitted player after current (wrap)
     let nextUid = null;
-    let newIndex = curIndex;
+    let newIndex = -1;
     for(let step = 1; step <= order.length; step++){
       const idx = (curIndex + step) % order.length;
       const uid = order[idx];
-      if(uid === lastPlayed || uid === justUid) continue;
       const p = state.onlinePlayers.find(x => x.uid === uid);
       if(p && !p.submitted){ nextUid = uid; newIndex = idx; break; }
     }
 
-    // Also try by submitted flag if lastPlayed filter was too strict
-    if(!nextUid){
-      for(let step = 1; step <= order.length; step++){
-        const idx = (curIndex + step) % order.length;
-        const uid = order[idx];
-        const p = state.onlinePlayers.find(x => x.uid === uid);
-        if(p && !p.submitted){ nextUid = uid; newIndex = idx; break; }
-      }
-    }
-
     clearReviewTimer();
     lastReviewEndsAtStarted = null;
-
-    if(!nextUid){
-      // Everyone done → voting
-      roomRef.update({
-        status: 'voting',
-        turnPhase: 'play',
-        reviewEndsAt: null,
-        reviewForIndex: null,
-        lastPlayedUid: null
-      }).then(() => {
-        advancingTurn = false;
-        state.onlineTurnPhase = 'play';
-        state.onlineReviewEndsAt = null;
-        state.onlineRoundPhase = 'ready';
-        render();
-      }).catch(() => { advancingTurn = false; });
-      return;
-    }
-
-    // Optimistic local move
-    state.onlineCurrentTurnIndex = newIndex;
     state.onlineTurnPhase = 'play';
     state.onlineReviewEndsAt = null;
     state.onlineRoundPhase = 'ready';
     state.onlineReviewSecondsLeft = null;
     state.onlineLastTimerIndex = -1;
     state._botPlayingUid = null;
+
+    if(!nextUid || newIndex < 0){
+      roomRef.update({
+        status: 'voting',
+        turnPhase: 'play',
+        reviewEndsAt: null,
+        reviewForIndex: null,
+        lastPlayedUid: null
+      }).then(() => { advancingTurn = false; render(); })
+        .catch(() => { advancingTurn = false; });
+      return;
+    }
+
+    state.onlineCurrentTurnIndex = newIndex;
     render();
 
-    // Simple update (no transaction — more reliable with security rules)
     roomRef.update({
       currentTurnIndex: newIndex,
       turnPhase: 'play',
       reviewEndsAt: null,
       reviewForIndex: null,
-      lastPlayedUid: justUid
+      lastPlayedUid: justUid || null
     }).then(() => {
       advancingTurn = false;
-      setTimeout(() => { maybePlayBotTurn(); }, 300);
+      setTimeout(() => { maybePlayBotTurn(); }, 400);
     }).catch(err => {
-      console.warn('advance update failed', err);
+      console.warn('advance failed', err);
       advancingTurn = false;
-      // Retry once
-      setTimeout(() => {
-        if(state.onlineStatus === 'reveal'){
-          advancingTurn = false;
-          advanceToNextTurn();
-        }
-      }, 1200);
     });
-
-    setTimeout(() => { maybePlayBotTurn(); }, 350);
   }
 
   function goToOnlineRound(){
