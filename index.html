@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v30";
+const GAME_VERSION = "v31";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 
 const firebaseConfig = {
@@ -725,25 +725,36 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     }, 1000);
   }
 
+  let advancingTurn = false;
+  let lastReviewEndsAtStarted = null;
+
   function clearReviewTimer(){
     if(reviewInterval){ clearInterval(reviewInterval); reviewInterval = null; }
     state.onlineReviewSecondsLeft = null;
   }
   function startReviewTimer(endsAt){
+    if(!endsAt) return;
+    // Don't restart the same countdown over and over (causes the "back to 10s" glitch)
+    if(reviewInterval && lastReviewEndsAtStarted === endsAt) return;
+    lastReviewEndsAtStarted = endsAt;
     clearReviewTimer();
+    lastReviewEndsAtStarted = endsAt;
+
     function tick(){
       const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
       state.onlineReviewSecondsLeft = left;
       if(left <= 0){
         clearReviewTimer();
-        // The player who just finished (or host) advances to the next turn
+        lastReviewEndsAtStarted = null;
         advanceToNextTurn();
       } else {
         render();
       }
     }
     tick();
-    reviewInterval = setInterval(tick, 250);
+    if(state.onlineReviewSecondsLeft > 0){
+      reviewInterval = setInterval(tick, 250);
+    }
   }
 
 
@@ -1615,8 +1626,13 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       // Shared 10s review countdown for everyone
       if(data.status === 'reveal' && state.onlineTurnPhase === 'review' && state.onlineReviewEndsAt){
         startReviewTimer(state.onlineReviewEndsAt);
+        // Host safety net: if review is overdue, force advance (fixes stuck 10s loop)
+        if(state.isHost && Date.now() > state.onlineReviewEndsAt + 800){
+          advanceToNextTurn();
+        }
       } else if(state.onlineTurnPhase !== 'review'){
         clearReviewTimer();
+        lastReviewEndsAtStarted = null;
       }
 
       if(data.status === 'reveal' && !state.onlineSecret){
@@ -2234,31 +2250,62 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     render();
   }
 
-  // Called when the 10s review countdown finishes — advance to next player or voting
+  // Called when the 10s review countdown finishes — pick a random remaining player or go to voting
   function advanceToNextTurn(){
     if(!fbReady || !state.roomCode) return;
-    // Only one client should advance (prefer the player who just played, or the host)
+    if(advancingTurn) return;
+    if(state.onlineTurnPhase !== 'review' && state.onlineRoundPhase !== 'stopped') return;
+
+    // Prefer host or the player who just finished so we don't get double-updates
     const justPlayedUid = state.onlineTurnOrder[state.onlineCurrentTurnIndex];
     const iAmResponsible = (state.currentUser && state.currentUser.uid === justPlayedUid) || state.isHost;
     if(!iAmResponsible) return;
 
-    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
-    const newIndex = state.onlineCurrentTurnIndex + 1;
+    advancingTurn = true;
 
-    if(newIndex >= state.onlineTurnOrder.length){
+    // Optimistic local unlock so UI leaves the review screen immediately
+    state.onlineTurnPhase = 'play';
+    state.onlineReviewEndsAt = null;
+    state.onlineRoundPhase = 'ready';
+    state.onlineReviewSecondsLeft = null;
+    clearReviewTimer();
+    lastReviewEndsAtStarted = null;
+
+    // Remaining players who have not submitted yet
+    const remainingUids = (state.onlineTurnOrder || []).filter(uid => {
+      const p = state.onlinePlayers.find(x => x.uid === uid);
+      return p && !p.submitted;
+    });
+
+    const roomRef = fbDb.collection('rooms').doc(state.roomCode);
+
+    if(remainingUids.length === 0){
       roomRef.update({
-        currentTurnIndex: newIndex,
         status: 'voting',
         turnPhase: 'play',
         reviewEndsAt: null
-      }).catch(() => {});
-    } else {
-      roomRef.update({
-        currentTurnIndex: newIndex,
-        turnPhase: 'play',
-        reviewEndsAt: null
-      }).catch(() => {});
+      }).then(() => { advancingTurn = false; })
+        .catch(() => { advancingTurn = false; });
+      render();
+      return;
     }
+
+    // Randomly choose the next player among those who still need to go
+    const nextUid = remainingUids[Math.floor(Math.random() * remainingUids.length)];
+    let newIndex = state.onlineTurnOrder.indexOf(nextUid);
+    if(newIndex < 0) newIndex = 0;
+
+    state.onlineCurrentTurnIndex = newIndex;
+    state.onlineLastTimerIndex = -1; // allow turn timer to start for the new player
+
+    roomRef.update({
+      currentTurnIndex: newIndex,
+      turnPhase: 'play',
+      reviewEndsAt: null
+    }).then(() => { advancingTurn = false; })
+      .catch(() => { advancingTurn = false; });
+
+    render();
   }
 
   function goToOnlineRound(){
