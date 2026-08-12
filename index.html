@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v39";
+const GAME_VERSION = "v40";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -751,8 +751,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       if(left <= 0){
         clearReviewTimer();
         lastReviewEndsAtStarted = null;
-        // HOST ONLY advances — stops multi-client turn races
-        if(state.isHost) advanceToNextTurn();
+        // Any client may request advance; advanceToNextTurn is idempotent / guarded
+        advanceToNextTurn();
       } else {
         render();
       }
@@ -1431,6 +1431,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     state.onlineError = null;
     state.screen = 'onlineHome';
     subscribeToPublicRooms();
+    startLobbyBotSim();
     render();
   }
 
@@ -1593,6 +1594,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
   function subscribeToRoom(code){
     unsubscribeOnline();
+    stopLobbyBotSim(); // don't spam rooms while in a game
     subscribeToChat(code);
     const roomRef = fbDb.collection('rooms').doc(code);
 
@@ -1613,43 +1615,66 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       const indexChanged = incomingIndex !== state.onlineCurrentTurnIndex;
       state.onlineCurrentTurnIndex = incomingIndex;
 
-      // Don't let a lagging snapshot wipe an optimistic local review phase —
-      // BUT only if we're still on the same turn index
       const incomingPhase = data.turnPhase || 'play';
+      const curUid = (state.onlineTurnOrder || [])[incomingIndex];
+      const curPlayer = state.onlinePlayers.find(p => p.uid === curUid);
+      const curAlreadyDone = !!(curPlayer && curPlayer.submitted);
+
+      // Protect optimistic local review from lagging "play" snapshots on same index
       const localReviewActive = state.onlineTurnPhase === 'review' && state.onlineReviewEndsAt && Date.now() < state.onlineReviewEndsAt && !indexChanged;
+
       if(incomingPhase === 'review' && (data.reviewForIndex == null || data.reviewForIndex === incomingIndex)){
         state.onlineTurnPhase = 'review';
         state.onlineReviewEndsAt = data.reviewEndsAt || state.onlineReviewEndsAt;
-      } else if(incomingPhase === 'play' || indexChanged){
+        state.onlineRoundPhase = 'stopped';
+      } else if(indexChanged){
+        // New turn — reset local play state
         state.onlineTurnPhase = 'play';
         state.onlineReviewEndsAt = null;
-        if(state.onlineRoundPhase === 'stopped') state.onlineRoundPhase = 'ready';
-        if(indexChanged){
-          clearReviewTimer();
-          lastReviewEndsAtStarted = null;
-          state._botPlayingUid = null;
+        state.onlineRoundPhase = 'ready';
+        clearReviewTimer();
+        lastReviewEndsAtStarted = null;
+        state._botPlayingUid = null;
+      } else if(incomingPhase === 'play' && !localReviewActive){
+        // Same index, server says play
+        if(curAlreadyDone){
+          // Current player already submitted but phase still play → stay stopped, request advance
+          state.onlineTurnPhase = 'play';
+          state.onlineRoundPhase = 'stopped';
+          if(!advancingTurn) setTimeout(() => advanceToNextTurn(), 200);
+        } else {
+          state.onlineTurnPhase = 'play';
+          state.onlineReviewEndsAt = null;
+          // Only go back to ready if we haven't already finished this turn
+          if(state.onlineRoundPhase === 'stopped'){
+            // Don't snap back to TAP TO START if we already played
+            const meDone = state.currentUser && state.onlinePlayers.find(p => p.uid === state.currentUser.uid && p.submitted);
+            if(!meDone) state.onlineRoundPhase = 'ready';
+          }
         }
-      } else if(!localReviewActive){
-        state.onlineTurnPhase = incomingPhase;
+      } else if(!localReviewActive && incomingPhase === 'review'){
+        state.onlineTurnPhase = 'review';
         state.onlineReviewEndsAt = data.reviewEndsAt || null;
+        state.onlineRoundPhase = 'stopped';
       }
 
       const myTurnNow = state.currentUser && state.onlineTurnOrder[state.onlineCurrentTurnIndex] === state.currentUser.uid;
+      const meDoc = state.currentUser && state.onlinePlayers.find(p => p.uid === state.currentUser.uid);
+      const iAlreadySubmitted = !!(meDoc && meDoc.submitted);
 
-      // Start the 20s "you must take your turn" timer only for the active player in play phase
-      if(data.status === 'reveal' && state.onlineTurnPhase !== 'review' && myTurnNow && state.onlineLastTimerIndex !== state.onlineCurrentTurnIndex){
+      // Start the 20s auto-skip only if it's truly your turn and you haven't submitted
+      if(data.status === 'reveal' && state.onlineTurnPhase !== 'review' && myTurnNow && !iAlreadySubmitted && state.onlineLastTimerIndex !== state.onlineCurrentTurnIndex){
         state.onlineLastTimerIndex = state.onlineCurrentTurnIndex;
         state.onlineRoundPhase = 'ready';
         startTurnTimer();
-      } else if(!myTurnNow || data.status !== 'reveal' || state.onlineTurnPhase === 'review'){
+      } else if(!myTurnNow || data.status !== 'reveal' || state.onlineTurnPhase === 'review' || iAlreadySubmitted){
         clearTurnTimer();
       }
 
       // Shared 10s review countdown for everyone
       if(data.status === 'reveal' && state.onlineTurnPhase === 'review' && state.onlineReviewEndsAt){
         startReviewTimer(state.onlineReviewEndsAt);
-        // Host safety: if review is overdue by 1.5s, force advance once
-        if(state.isHost && Date.now() > state.onlineReviewEndsAt + 1500 && !advancingTurn){
+        if(Date.now() > state.onlineReviewEndsAt + 1200 && !advancingTurn){
           advanceToNextTurn();
         }
       } else if(state.onlineTurnPhase !== 'review'){
@@ -2137,6 +2162,166 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     });
   }
 
+  // ===== Lobby activity: bots create / join / leave public rooms (owner client only) =====
+  const LOBBY_ROOM_NAMES = [
+    'Chill Room','Speed Run','Noobs Only','Pro Lobby','Timer Wars','gg ez','Quick Match',
+    'Late Night','Squad Up','Imposter Hunt','Try Hard','Casual','Ranked','Fun Only',
+    'AFK ok','One More','Last Game','Duo Queue','Trio','Full Send','Vibes','Lock In',
+    'Warmup','Main Lobby','EU Server','NA East','Random','Test Room','Come Join','Hurry'
+  ];
+  const LOBBY_MAX_OPTS = [3, 4, 5, 6, 8, 9, 10];
+  let lobbySimTimer = null;
+  let lobbySimBusy = false;
+
+  function pickLobbyRoomName(){
+    const base = LOBBY_ROOM_NAMES[Math.floor(Math.random() * LOBBY_ROOM_NAMES.length)];
+    if(Math.random() < 0.35) return base + ' ' + Math.floor(1 + Math.random() * 99);
+    return base;
+  }
+
+  function stopLobbyBotSim(){
+    if(lobbySimTimer){ clearInterval(lobbySimTimer); lobbySimTimer = null; }
+  }
+
+  function startLobbyBotSim(){
+    if(!fbReady || !state.currentUser || !state.currentUser.isOwner) return;
+    stopLobbyBotSim();
+    // Run every 4–7s with jitter inside
+    lobbySimTimer = setInterval(() => { tickLobbyBotSim(); }, 4500);
+    // Kick once soon so lobby isn't empty
+    setTimeout(() => tickLobbyBotSim(), 800);
+  }
+
+  function tickLobbyBotSim(){
+    if(lobbySimBusy) return;
+    if(!fbReady || !state.currentUser || !state.currentUser.isOwner) return;
+    // Only while browsing online lists (not mid-game)
+    if(state.screen !== 'onlineHome' && state.screen !== 'onlineCreate' && state.screen !== 'onlineJoinPrivate') return;
+    lobbySimBusy = true;
+
+    const botRooms = (state.publicRooms || []).filter(r => r.botSimulated);
+    const humanRooms = (state.publicRooms || []).filter(r => !r.botSimulated);
+    // Target density fluctuates: sometimes quiet, sometimes busy
+    const hourBump = Math.random();
+    const targetBotRooms = hourBump < 0.15 ? Math.floor(2 + Math.random() * 4)
+      : hourBump < 0.55 ? Math.floor(6 + Math.random() * 8)
+      : hourBump < 0.85 ? Math.floor(12 + Math.random() * 15)
+      : Math.floor(20 + Math.random() * 25); // rare busy spike
+
+    const actions = [];
+    // Create rooms if under target
+    if(botRooms.length < targetBotRooms && Math.random() < 0.7){
+      actions.push('create');
+      if(botRooms.length < targetBotRooms - 3 && Math.random() < 0.45) actions.push('create');
+    }
+    // Delete some bot rooms
+    if(botRooms.length > 0 && (botRooms.length > targetBotRooms || Math.random() < 0.35)){
+      actions.push('delete');
+      if(botRooms.length > targetBotRooms + 4 && Math.random() < 0.5) actions.push('delete');
+    }
+    // Join human public rooms
+    if(humanRooms.length > 0 && Math.random() < 0.4) actions.push('joinHuman');
+    // Join other bot rooms to fill them
+    if(botRooms.length > 0 && Math.random() < 0.35) actions.push('joinBot');
+
+    const run = async () => {
+      try {
+        for(const act of actions){
+          if(act === 'create') await lobbyCreateBotRoom();
+          else if(act === 'delete') await lobbyDeleteRandomBotRoom(botRooms);
+          else if(act === 'joinHuman') await lobbyBotJoinRoom(humanRooms);
+          else if(act === 'joinBot') await lobbyBotJoinRoom(botRooms);
+        }
+      } catch(e){ console.warn('lobby sim', e); }
+      lobbySimBusy = false;
+    };
+    run();
+  }
+
+  async function lobbyCreateBotRoom(){
+    const code = genRoomCode();
+    const maxPlayers = LOBBY_MAX_OPTS[Math.floor(Math.random() * LOBBY_MAX_OPTS.length)];
+    const roomName = pickLobbyRoomName();
+    const modes = ['fast', 'standard', 'marathon'];
+    const clues = ['off', 'easy', 'normal', 'hard'];
+    const hostBotId = 'bot_host_' + code;
+    const hostName = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+    await fbDb.collection('rooms').doc(code).set({
+      hostUid: hostBotId,
+      roomName: roomName,
+      isPrivate: false,
+      password: null,
+      status: 'waiting',
+      maxPlayers: maxPlayers,
+      mode: modes[Math.floor(Math.random() * modes.length)],
+      clueLevel: clues[Math.floor(Math.random() * clues.length)],
+      teamMode: Math.random() < 0.2,
+      enableClues: true,
+      botSimulated: true,
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    // Host bot + maybe 0–2 friends already in
+    await fbDb.collection('rooms').doc(code).collection('players').doc(hostBotId).set({
+      name: hostName,
+      photoURL: '',
+      isBot: true,
+      isOwner: false,
+      joined: firebase.firestore.FieldValue.serverTimestamp(),
+      votedFor: null
+    });
+    const extra = Math.floor(Math.random() * 3);
+    for(let i = 0; i < extra; i++){
+      const bid = 'bot_' + code + '_' + i + '_' + Math.floor(Math.random() * 999);
+      const n = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+      await fbDb.collection('rooms').doc(code).collection('players').doc(bid).set({
+        name: n,
+        photoURL: '',
+        isBot: true,
+        isOwner: false,
+        joined: firebase.firestore.FieldValue.serverTimestamp(),
+        votedFor: null
+      });
+    }
+  }
+
+  async function lobbyDeleteRandomBotRoom(botRooms){
+    if(!botRooms || !botRooms.length) return;
+    const room = botRooms[Math.floor(Math.random() * botRooms.length)];
+    // Don't delete the room the owner is currently in
+    if(state.roomCode && room.code === state.roomCode) return;
+    try {
+      const players = await fbDb.collection('rooms').doc(room.code).collection('players').get();
+      const batch = fbDb.batch();
+      players.forEach(d => batch.delete(d.ref));
+      batch.delete(fbDb.collection('rooms').doc(room.code));
+      await batch.commit();
+    } catch(e){ console.warn('delete bot room', e); }
+  }
+
+  async function lobbyBotJoinRoom(rooms){
+    if(!rooms || !rooms.length) return;
+    const room = rooms[Math.floor(Math.random() * rooms.length)];
+    if(state.roomCode && room.code === state.roomCode) return;
+    try {
+      const playersSnap = await fbDb.collection('rooms').doc(room.code).collection('players').get();
+      if(playersSnap.size >= (room.maxPlayers || 10)) return;
+      // Don't spam more than a few bots into one room
+      let botCount = 0;
+      playersSnap.forEach(d => { if(d.data().isBot) botCount++; });
+      if(botCount >= 4) return;
+      const botId = 'bot_j_' + Date.now() + '_' + Math.floor(Math.random() * 9999);
+      const name = BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)];
+      await fbDb.collection('rooms').doc(room.code).collection('players').doc(botId).set({
+        name: name,
+        photoURL: '',
+        isBot: true,
+        isOwner: false,
+        joined: firebase.firestore.FieldValue.serverTimestamp(),
+        votedFor: null
+      });
+    } catch(e){ console.warn('bot join room', e); }
+  }
+
   function modeTimeRangeMs(){
     let minS = 1, maxS = 9;
     if(state.mode === 'fast'){ minS = 0.5; maxS = 3; }
@@ -2530,54 +2715,62 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     render();
   }
 
-  // HOST ONLY. Sequential next unsubmitted player. No races.
+  // Sequential next unsubmitted player. Any client can call; guarded by advancingTurn + phase.
   function advanceToNextTurn(){
     if(!fbReady || !state.roomCode) return;
-    if(!state.isHost) return; // critical — only host writes turn index
     if(advancingTurn) return;
+    if(state.onlineStatus !== 'reveal') return;
+
+    const order = (state.onlineTurnOrder || []).slice();
+    if(!order.length) return;
+    const curIndex = state.onlineCurrentTurnIndex || 0;
+    const justUid = order[curIndex];
+    const justPlayed = state.onlinePlayers.find(p => p.uid === justUid);
+
+    // Only advance if current player is done OR we're in review
+    const mustAdvance = state.onlineTurnPhase === 'review' || (justPlayed && justPlayed.submitted);
+    if(!mustAdvance) return;
+
     advancingTurn = true;
 
     const roomRef = fbDb.collection('rooms').doc(state.roomCode);
-    const order = (state.onlineTurnOrder || []).slice();
-    const curIndex = state.onlineCurrentTurnIndex || 0;
-    const justUid = order[curIndex];
-
-    // Mark just-played submitted locally
-    const justPlayed = state.onlinePlayers.find(p => p.uid === justUid);
     if(justPlayed){ justPlayed.submitted = true; justPlayed.timing = false; }
 
-    // Next unsubmitted player after current (wrap)
+    // Next unsubmitted player after current (wrap). Never pick justUid again this step.
     let nextUid = null;
     let newIndex = -1;
     for(let step = 1; step <= order.length; step++){
       const idx = (curIndex + step) % order.length;
       const uid = order[idx];
+      if(uid === justUid) continue;
       const p = state.onlinePlayers.find(x => x.uid === uid);
       if(p && !p.submitted){ nextUid = uid; newIndex = idx; break; }
     }
 
     clearReviewTimer();
     lastReviewEndsAtStarted = null;
-    state.onlineTurnPhase = 'play';
     state.onlineReviewEndsAt = null;
-    state.onlineRoundPhase = 'ready';
     state.onlineReviewSecondsLeft = null;
     state.onlineLastTimerIndex = -1;
     state._botPlayingUid = null;
 
     if(!nextUid || newIndex < 0){
+      state.onlineTurnPhase = 'play';
       roomRef.update({
         status: 'voting',
         turnPhase: 'play',
         reviewEndsAt: null,
         reviewForIndex: null,
-        lastPlayedUid: null
+        lastPlayedUid: justUid || null
       }).then(() => { advancingTurn = false; render(); })
         .catch(() => { advancingTurn = false; });
       return;
     }
 
     state.onlineCurrentTurnIndex = newIndex;
+    state.onlineTurnPhase = 'play';
+    state.onlineRoundPhase = 'ready';
+    state.onlineLastPlayedUid = justUid;
     render();
 
     roomRef.update({
@@ -2588,7 +2781,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       lastPlayedUid: justUid || null
     }).then(() => {
       advancingTurn = false;
-      setTimeout(() => { maybePlayBotTurn(); }, 400);
+      setTimeout(() => { maybePlayBotTurn(); }, 350);
     }).catch(err => {
       console.warn('advance failed', err);
       advancingTurn = false;
@@ -3283,10 +3476,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const currentNameHtml = currentPlayer ? formatPlayerName(currentPlayer) : 'Player';
     const currentNamePlain = currentPlayer ? currentPlayer.name : 'Player';
     const myTurn = state.currentUser && currentUid === state.currentUser.uid;
-    // Treat local "stopped" as review so we never show the dead Submitted/DONE screen
-    const isReview = state.onlineTurnPhase === 'review' || state.onlineRoundPhase === 'stopped';
+    const meDoc = state.currentUser && state.onlinePlayers.find(p => p.uid === state.currentUser.uid);
+    const iAlreadySubmitted = !!(meDoc && meDoc.submitted);
+    // If the current turn player already submitted, ALWAYS show result (never TAP TO START again)
+    const isReview = state.onlineTurnPhase === 'review'
+      || state.onlineRoundPhase === 'stopped'
+      || !!(currentPlayer && currentPlayer.submitted);
     const turnNum = state.onlineCurrentTurnIndex + 1;
     const totalTurns = state.onlineTurnOrder.length;
+
+    // Current player done but index hasn't moved → request advance (once)
+    if(currentPlayer && currentPlayer.submitted && state.onlineTurnPhase !== 'review' && !advancingTurn && !state._advanceScheduled){
+      state._advanceScheduled = true;
+      setTimeout(() => { state._advanceScheduled = false; advanceToNextTurn(); }, 250);
+    }
 
     // ===== REVIEW PHASE: show the exact time first, then countdown =====
     if(isReview){
