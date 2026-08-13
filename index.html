@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v46";
+const GAME_VERSION = "v47";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -1621,16 +1621,19 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           state.onlineBotSimulated = !!roomData.botSimulated;
           state.onlineError = null;
 
-          // Bot-hosted rooms: first human becomes host so they can start the game
-          // (bot hostUid was the site owner; guests otherwise can never start)
+          // Bot rooms: claim hostUid only for write permissions, but UI treats you as guest
+          // (no Start button — auto-starts in 3–10s). Your own rooms still make you real host.
           let amHost = (roomData.hostUid === state.currentUser.uid);
           if(roomData.botSimulated && !amHost){
             try {
               await roomRef.update({ hostUid: state.currentUser.uid });
+              // Keep isHost true internally so bot turns/votes/start can run from this client
               amHost = true;
             } catch(e){ console.warn('claim bot host', e); }
           }
           state.isHost = amHost;
+          // Flag used by UI to hide Start Game on bot rooms
+          state.onlineBotSimulated = !!roomData.botSimulated;
 
           await roomRef.collection('players').doc(state.currentUser.uid).set({
             name: state.currentUser.name,
@@ -2790,15 +2793,19 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       const isImposter = !!secret.isImposter;
       const clue = secret.clue || null;
 
-      // Short delay then show "timing..."
+      // Decide the score FIRST, then wait that long in real time so it matches the display
+      const elapsed = botRandomTimeMs(isImposter, clue, secret.targetMs);
+      // Small "react / start" delay before timer begins, then wait ~elapsed ms
+      const startDelay = 500 + Math.random() * 700;
+      const runMs = Math.max(800, elapsed); // never instant
+
+      // After startDelay → show "timing..."
       const t1 = setTimeout(() => {
         playerRef.update({ timing: true, submitted: false }).catch(() => {});
-      }, 700 + Math.random() * 900);
+      }, startDelay);
 
-      // Think time, then stop
-      const thinkMs = 1600 + Math.random() * 3400;
+      // After startDelay + runMs → stop with that score
       const t2 = setTimeout(() => {
-        const elapsed = botRandomTimeMs(isImposter, clue, secret.targetMs);
         const reviewEndsAt = Date.now() + (REVIEW_SECONDS * 1000);
 
         state.onlineTurnPhase = 'review';
@@ -2820,10 +2827,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           .catch(() => {})
           .finally(() => { state._botPlayingUid = null; });
 
-        // Occasional human-like chat after their turn
         botMaybeChat(uid, bot.name, BOT_LINES_REVIEW, 0.45);
         render();
-      }, 700 + thinkMs);
+      }, startDelay + runMs);
 
       botActionTimers.push(t1, t2);
     }).catch(() => {
@@ -3776,10 +3782,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function renderOnlineLobby(){
     // Add Bot is OWNER-ONLY (site owner)
     const canAddBot = state.currentUser && state.currentUser.isOwner && state.onlinePlayers.length < (state.onlineMaxPlayers || 10);
-    const canStart = (state.isHost || state.onlineBotSimulated) && state.onlinePlayers.length >= 3;
+    // Bot rooms never show Start — they auto-start in 3–10s
+    const isBotRoom = !!state.onlineBotSimulated;
+    const canStart = state.isHost && !isBotRoom && state.onlinePlayers.length >= 3;
     const boxes = state.onlinePlayers.map(p => {
       const isMe = state.currentUser && p.uid === state.currentUser.uid;
-      const canKick = state.isHost && !isMe;
+      const canKick = state.isHost && !isBotRoom && !isMe;
       return `
       <div style="display:flex; flex-direction:column; align-items:center; gap:6px; width:90px; position:relative;">
         ${avatarHtml(p, 52)}
@@ -3787,22 +3795,28 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         ${canKick ? `<button onclick="TI.kickPlayer('${p.uid}')" style="margin-top:2px; background:transparent; border:1px solid var(--red); color:var(--red); border-radius:4px; font-size:10px; padding:2px 8px; cursor:pointer; font-family:'Space Mono',monospace; letter-spacing:.05em; text-transform:uppercase;">Kick</button>` : ''}
       </div>`;
     }).join('');
+    let actionArea;
+    if(isBotRoom){
+      actionArea = `<p class="helper-note">Bot lobby — game starts automatically in a few seconds...</p>`;
+    } else if(canStart){
+      actionArea = `<button class="btn solid" onclick="TI.startOnlineGame()">Start Game (${state.onlinePlayers.length} joined)</button>`;
+    } else if(state.isHost){
+      actionArea = `<button class="btn solid" onclick="TI.startOnlineGame()" style="opacity:.55;">Start Game (${state.onlinePlayers.length} joined)</button>`;
+    } else {
+      actionArea = `<p class="helper-note">Waiting for the host to start the game...</p>`;
+    }
     return `
       <div class="screen">
         <div class="eyebrow" style="display:flex; justify-content:space-between; align-items:center;">
           <span>Room Lobby // Max: ${state.onlineMaxPlayers} Players</span>
-          ${state.isHost ? `<button onclick="TI.toggleCloseRoomConfirm(true)" style="background:transparent; border:1px solid var(--red); color:var(--red); border-radius:50%; width:26px; height:26px; font-size:14px; cursor:pointer; flex:none;">✕</button>` : ''}
+          ${state.isHost && !isBotRoom ? `<button onclick="TI.toggleCloseRoomConfirm(true)" style="background:transparent; border:1px solid var(--red); color:var(--red); border-radius:50%; width:26px; height:26px; font-size:14px; cursor:pointer; flex:none;">✕</button>` : ''}
         </div>
         <h1 style="font-size:clamp(28px,7vw,34px); margin-top:6px;">Code: ${state.roomCode}</h1>
         <p class="sub">Waiting for players to join. Need at least 3 players.</p>
         <div style="display:flex; flex-wrap:wrap; gap:14px; padding:14px 0;">${boxes}</div>
         <div class="spacer"></div>
         <div class="row-gap">
-          ${canStart
-            ? `<button class="btn solid" onclick="TI.startOnlineGame()">Start Game (${state.onlinePlayers.length} joined)</button>`
-            : (state.isHost
-                ? `<button class="btn solid" onclick="TI.startOnlineGame()" style="opacity:.55;">Start Game (${state.onlinePlayers.length} joined)</button>`
-                : `<p class="helper-note">Waiting for the host to start the game...</p>`)}
+          ${actionArea}
           ${canAddBot ? `<button class="btn ghost" onclick="TI.addBot()">🤖 Add Bot</button>` : ''}
           <button class="btn ghost" onclick="TI.exitOnlineToMenu()">Leave Room</button>
         </div>
