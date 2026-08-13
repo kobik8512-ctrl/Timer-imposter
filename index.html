@@ -555,7 +555,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v47";
+const GAME_VERSION = "v48";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -2481,8 +2481,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     const code = genRoomCode();
     const maxPlayers = LOBBY_MAX_OPTS[Math.floor(Math.random() * LOBBY_MAX_OPTS.length)];
     const roomName = pickLobbyRoomName();
-    const modes = ['fast', 'standard', 'marathon'];
-    const clues = ['off', 'easy', 'normal', 'hard'];
+    // Weighted random so rooms feel different (not all standard/normal)
+    const modeRoll = Math.random();
+    const mode = modeRoll < 0.28 ? 'fast' : modeRoll < 0.72 ? 'standard' : 'marathon';
+    const clueRoll = Math.random();
+    const clueLevel = clueRoll < 0.12 ? 'off' : clueRoll < 0.32 ? 'easy' : clueRoll < 0.72 ? 'normal' : 'hard';
+    const teamMode = Math.random() < 0.22;
     const hostUid = state.currentUser.uid; // rules require real auth uid
     const hostBotId = 'bot_host_' + code;
     const usedNames = new Set();
@@ -2495,10 +2499,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       password: null,
       status: 'waiting',
       maxPlayers: maxPlayers,
-      mode: modes[Math.floor(Math.random() * modes.length)],
-      clueLevel: clues[Math.floor(Math.random() * clues.length)],
-      teamMode: Math.random() < 0.2,
-      enableClues: true,
+      mode: mode,
+      clueLevel: clueLevel,
+      teamMode: teamMode,
+      enableClues: clueLevel !== 'off',
       botSimulated: true,
       createdAt: firebase.firestore.FieldValue.serverTimestamp()
     });
@@ -3646,11 +3650,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function renderOnlineHome(){
     const publicList = state.publicRooms.length > 0 ? state.publicRooms.map(r => {
       const isMine = state.currentUser && r.hostUid === state.currentUser.uid && !r.botSimulated;
+      const modeLabel = (r.mode || 'standard').toUpperCase();
+      const clueLabel = (r.clueLevel || 'normal').toUpperCase();
+      const teamLabel = r.teamMode ? ' • TEAM' : '';
       return `
       <div class="result-row">
         <div>
           <div class="rname">${r.roomName || 'Public Room'}</div>
-          <span style="font-size:12px; color:var(--muted);">${(r.mode || 'standard').toUpperCase()} • Max: ${r.maxPlayers || 10}</span>
+          <span style="font-size:11px; color:var(--muted);">${modeLabel} • Clue ${clueLabel}${teamLabel} • Max ${r.maxPlayers || 10}</span>
         </div>
         <div style="display:flex; gap:6px; align-items:center;">
           <button class="chip-btn active" style="flex:none; padding:6px 12px;" onclick="TI.joinPublicRoom('${r.code}')">Join</button>
