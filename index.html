@@ -548,6 +548,7 @@
 <div id="app"></div>
 <button class="audio-btn active" id="audioToggle" onclick="TI.toggleAudio()">🔊</button>
 <button class="audio-btn" id="adminToggleBtn" style="right:56px; display:none; border-color:var(--amber); color:var(--amber);" onclick="TI.toggleAdmin(true)">⚔</button>
+<button class="audio-btn" id="addBotBtn" style="right:98px; display:none; border-color:var(--amber); color:var(--amber); font-size:13px; font-weight:700;" onclick="TI.addBot()" title="Add bot">b</button>
 <div class="corner-credit">made by kobi</div>
 <div class="corner-version" id="versionTag"></div>
 <button class="chat-btn" id="chatToggleBtn" onclick="TI.toggleChat(true)">💬</button>
@@ -555,7 +556,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v49";
+const GAME_VERSION = "v50";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -2059,8 +2060,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function renderAdminPanelDOM(){
     const root = document.getElementById('adminPanelRoot');
     const btn = document.getElementById('adminToggleBtn');
+    const botBtn = document.getElementById('addBotBtn');
+    const isOwner = !!(state.currentUser && state.currentUser.isOwner);
     if(btn){
-      btn.style.display = (state.currentUser && state.currentUser.isOwner) ? 'flex' : 'none';
+      btn.style.display = isOwner ? 'flex' : 'none';
+    }
+    // Small "b" next to cmds — owner only, works in a waiting lobby
+    if(botBtn){
+      botBtn.style.display = isOwner ? 'flex' : 'none';
     }
     if(!root) return;
     if(!state.showAdmin || !state.currentUser || !state.currentUser.isOwner){
@@ -2408,26 +2415,24 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function startOnlinePopulationSim(){
     if(onlinePopTimer) return;
     if(!state.fakeOnlineCount){
-      // Start somewhere interesting: often 1k–8k
+      // Start somewhere interesting: often ~1k–8k, never below 264
       const band = Math.random();
-      if(band < 0.15) state.fakeOnlineCount = 900 + Math.floor(Math.random() * 900);
-      else if(band < 0.55) state.fakeOnlineCount = 2500 + Math.floor(Math.random() * 2500);
-      else if(band < 0.85) state.fakeOnlineCount = 5000 + Math.floor(Math.random() * 2500);
-      else state.fakeOnlineCount = 7500 + Math.floor(Math.random() * 3500);
+      if(band < 0.15) state.fakeOnlineCount = 264 + Math.floor(Math.random() * 700);
+      else if(band < 0.55) state.fakeOnlineCount = 1800 + Math.floor(Math.random() * 2200);
+      else if(band < 0.85) state.fakeOnlineCount = 4200 + Math.floor(Math.random() * 2500);
+      else state.fakeOnlineCount = 7000 + Math.floor(Math.random() * 3000);
     }
     onlinePopTimer = setInterval(() => {
-      // Small tick most of the time (±1–12), occasional bigger swings
+      // Slow, gentle drift — rarely big jumps
       const r = Math.random();
       let delta;
-      if(r < 0.55) delta = (Math.random() < 0.5 ? -1 : 1) * (1 + Math.floor(Math.random() * 4));
-      else if(r < 0.85) delta = (Math.random() < 0.5 ? -1 : 1) * (5 + Math.floor(Math.random() * 12));
-      else if(r < 0.95) delta = (Math.random() < 0.5 ? -1 : 1) * (20 + Math.floor(Math.random() * 40));
-      else delta = (Math.random() < 0.5 ? -1 : 1) * (60 + Math.floor(Math.random() * 120));
+      if(r < 0.7) delta = (Math.random() < 0.5 ? -1 : 1) * (1 + Math.floor(Math.random() * 2)); // ±1–2
+      else if(r < 0.92) delta = (Math.random() < 0.5 ? -1 : 1) * (3 + Math.floor(Math.random() * 5)); // ±3–7
+      else delta = (Math.random() < 0.5 ? -1 : 1) * (8 + Math.floor(Math.random() * 12)); // ±8–19 rare
 
-      state.fakeOnlineCount = Math.max(420, Math.min(14000, (state.fakeOnlineCount || 3000) + delta));
-      // Refresh start / online home if visible so the number moves
+      state.fakeOnlineCount = Math.max(264, Math.min(14000, (state.fakeOnlineCount || 800) + delta));
       if(state.screen === 'start' || state.screen === 'onlineHome') render();
-    }, 700 + Math.floor(Math.random() * 900));
+    }, 4500 + Math.floor(Math.random() * 3500)); // every ~4.5–8s
   }
 
   async function seedLobbyBotRooms(){
@@ -3952,8 +3957,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   }
 
   function renderOnlineLobby(){
-    // Add Bot is OWNER-ONLY (site owner)
-    const canAddBot = state.currentUser && state.currentUser.isOwner && state.onlinePlayers.length < (state.onlineMaxPlayers || 10);
     // Bot rooms never show Start — they auto-start in 3–10s
     const isBotRoom = !!state.onlineBotSimulated;
     const canStart = state.isHost && !isBotRoom && state.onlinePlayers.length >= 3;
@@ -3989,7 +3992,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         <div class="spacer"></div>
         <div class="row-gap">
           ${actionArea}
-          ${canAddBot ? `<button class="btn ghost" onclick="TI.addBot()">🤖 Add Bot</button>` : ''}
           <button class="btn ghost" onclick="TI.exitOnlineToMenu()">Leave Room</button>
         </div>
       </div>
@@ -4219,6 +4221,8 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       if(chatBtn) chatBtn.style.display = 'none';
       const adminBtn = document.getElementById('adminToggleBtn');
       if(adminBtn) adminBtn.style.display = 'none';
+      const botBtn = document.getElementById('addBotBtn');
+      if(botBtn) botBtn.style.display = 'none';
       return;
     }
 
@@ -4256,8 +4260,11 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     app.innerHTML = html;
     const chatBtn = document.getElementById('chatToggleBtn');
     if(chatBtn) chatBtn.style.display = state.roomCode ? 'flex' : 'none';
+    const isOwner = !!(state.currentUser && state.currentUser.isOwner);
     const adminBtn = document.getElementById('adminToggleBtn');
-    if(adminBtn) adminBtn.style.display = (state.currentUser && state.currentUser.isOwner) ? 'flex' : 'none';
+    if(adminBtn) adminBtn.style.display = isOwner ? 'flex' : 'none';
+    const botBtn = document.getElementById('addBotBtn');
+    if(botBtn) botBtn.style.display = isOwner ? 'flex' : 'none';
     if(state.showAdmin) renderAdminPanelDOM();
   }
 
