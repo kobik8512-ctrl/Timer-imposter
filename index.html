@@ -556,7 +556,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v50";
+const GAME_VERSION = "v51";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -3534,7 +3534,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         <div style="margin-top:12px; padding:10px 14px; border:1px solid var(--line); border-radius:10px; background:rgba(0,0,0,.25); width:100%; box-sizing:border-box;">
           <div style="font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted);">Online players</div>
           <div style="font-size:22px; font-weight:700; color:var(--green); margin-top:2px;">${onlineN.toLocaleString()}</div>
-          <div style="font-size:11px; color:var(--muted); margin-top:2px;">Live worldwide · includes bots in lobbies</div>
         </div>
         ${signedIn ? `<p class="helper-note" style="margin-top:10px;">Signed in as <strong style="color:${state.currentUser.isOwner ? 'var(--amber)' : 'var(--green)'};">${state.currentUser.isOwner ? '[Owner] ' : ''}${state.currentUser.name}</strong></p>` : ''}
         <div class="spacer"></div>
