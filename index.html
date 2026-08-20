@@ -556,7 +556,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v52";
+const GAME_VERSION = "v53";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -708,9 +708,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       fbReady = true;
       startOnlinePopulationSim();
 
-      fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL);
-
-      fbAuth.onAuthStateChanged(user => {
+      function applyAuthUser(user){
         if (user) {
           state.currentUser = {
             uid: user.uid,
@@ -726,22 +724,20 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         }
         state.authSettled = true;
         render();
-      });
+      }
 
-      fbAuth.getRedirectResult().then(result => {
-        if (result && result.user) {
-          const u = result.user;
-          state.currentUser = {
-            uid: u.uid,
-            name: u.displayName || 'Player',
-            photoURL: u.photoURL || '',
-            email: (u.email || '').toLowerCase(),
-            isOwner: emailIsOwner(u.email)
-          };
-          state.authSettled = true;
-          render();
-        }
-      }).catch(err => console.warn('Redirect auth result error:', err));
+      // LOCAL = stay logged in after refresh (must complete before listening)
+      fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
+        .catch(err => console.warn('Auth persistence:', err))
+        .then(() => {
+          if (fbAuth.currentUser) applyAuthUser(fbAuth.currentUser);
+          fbAuth.onAuthStateChanged(user => applyAuthUser(user));
+          return fbAuth.getRedirectResult();
+        })
+        .then(result => {
+          if (result && result.user) applyAuthUser(result.user);
+        })
+        .catch(err => console.warn('Auth restore error:', err));
     } else {
       state.authSettled = true;
     }
@@ -987,34 +983,40 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     if(!fbReady){ render(); return; }
     playSFX('click');
     const provider = new firebase.auth.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+    const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
 
-    fbAuth.signInWithPopup(provider).then(result => {
-      const u = result.user;
-      state.currentUser = {
-        uid: u.uid,
-        name: u.displayName || 'Player',
-        photoURL: u.photoURL || '',
-        email: (u.email || '').toLowerCase(),
-        isOwner: emailIsOwner(u.email)
-      };
-      loadSavedProfile();
-      state.signInBlocked = false;
-      render();
+    fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).then(() => {
+      // Phones: redirect keeps session after reload better than popup
+      if (isMobile) return fbAuth.signInWithRedirect(provider);
+      return fbAuth.signInWithPopup(provider).then(result => {
+        const u = result.user;
+        state.currentUser = {
+          uid: u.uid,
+          name: u.displayName || 'Player',
+          photoURL: u.photoURL || '',
+          email: (u.email || '').toLowerCase(),
+          isOwner: emailIsOwner(u.email)
+        };
+        loadSavedProfile();
+        ensureUserDoc().catch(() => {});
+        state.signInBlocked = false;
+        render();
+      }).catch(err => {
+        console.warn('Popup sign-in failed:', err);
+        return fbAuth.signInWithRedirect(provider);
+      });
     }).catch(err => {
-      console.warn('Popup sign-in failed:', err);
+      console.warn('Sign-in failed:', err);
       const msg = (err && err.message) || '';
       const blockedIndicators = ['disallowed_useragent', 'operation-not-supported', 'popup-blocked', 'operation-not-allowed'];
-      const isBlocked = blockedIndicators.some(k => msg.indexOf(k) !== -1 || (err.code || '').indexOf(k) !== -1);
-      if(isBlocked){
+      if (blockedIndicators.some(k => msg.indexOf(k) !== -1 || (err.code || '').indexOf(k) !== -1)) {
         state.signInBlocked = true;
         render();
         return;
       }
-      fbAuth.signInWithRedirect(provider).catch(redirectErr => {
-        console.warn('Redirect sign-in also failed:', redirectErr);
-        state.signInBlocked = true;
-        render();
-      });
+      state.signInBlocked = true;
+      render();
     });
   }
 
