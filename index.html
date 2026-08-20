@@ -556,7 +556,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v54";
+const GAME_VERSION = "v55";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -708,8 +708,10 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       fbReady = true;
       startOnlinePopulationSim();
 
-      function applyAuthUser(user){
+      let authNullTimer = null;
+      function applyAuthUser(user, forceNull){
         if (user) {
+          if (authNullTimer) { clearTimeout(authNullTimer); authNullTimer = null; }
           state.currentUser = {
             uid: user.uid,
             name: user.displayName || 'Player',
@@ -717,16 +719,31 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             email: (user.email || '').toLowerCase(),
             isOwner: emailIsOwner(user.email)
           };
+          try { localStorage.setItem('ti_last_uid', user.uid); } catch(e){}
           loadSavedProfile();
           ensureUserDoc().catch(() => {});
-        } else {
-          state.currentUser = null;
+          state.authSettled = true;
+          render();
+          return;
         }
+        // Firebase often fires null briefly while restoring LOCAL session — don't log out yet
+        if (!forceNull && state.currentUser) {
+          if (authNullTimer) clearTimeout(authNullTimer);
+          authNullTimer = setTimeout(() => {
+            if (!fbAuth.currentUser) {
+              state.currentUser = null;
+              state.authSettled = true;
+              render();
+            }
+          }, 800);
+          return;
+        }
+        state.currentUser = null;
         state.authSettled = true;
         render();
       }
 
-      // LOCAL = stay logged in after refresh (must complete before listening)
+      // LOCAL = stay logged in after refresh
       fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
         .catch(err => console.warn('Auth persistence:', err))
         .then(() => {
@@ -3995,7 +4012,7 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     }).join('');
     let actionArea;
     if(isBotRoom){
-      actionArea = `<p class="helper-note">Bot lobby — game starts automatically in a few seconds...</p>`;
+      actionArea = `<p class="helper-note">Waiting for players…</p>`;
     } else if(canStart){
       actionArea = `<button class="btn solid" onclick="TI.startOnlineGame()">Start Game (${state.onlinePlayers.length} joined)</button>`;
     } else if(state.isHost){
