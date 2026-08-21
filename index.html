@@ -556,7 +556,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v55";
+const GAME_VERSION = "v56";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -708,17 +708,14 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       fbReady = true;
       startOnlinePopulationSim();
 
-      // Firebase can briefly report null while restoring a LOCAL session.
-      // Never clear the account during that startup window. This was the main
-      // cause of users appearing logged out after refresh/navigation.
+      // Firebase can emit a temporary null while restoring a LOCAL session.
+      // Do not turn that transient event into a logout.
       let authNullTimer = null;
-      let authStartupGrace = true;
-      const AUTH_STARTUP_GRACE_MS = 8000;
+      const AUTH_RESTORE_GRACE_MS = 12000;
 
-      function applyAuthUser(user, forceNull){
+      function applyAuthUser(user){
         if (user) {
           if (authNullTimer) { clearTimeout(authNullTimer); authNullTimer = null; }
-          authStartupGrace = false;
           state.currentUser = {
             uid: user.uid,
             name: user.displayName || 'Player',
@@ -737,49 +734,38 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           return;
         }
 
-        // A null event is NOT an automatic logout. Firebase may emit null
-        // before IndexedDB/local persistence has finished restoring the user.
-        if (forceNull) {
+        // If we already have a user, wait before treating null as a real logout.
+        if (state.currentUser || localStorage.getItem('ti_auth_seen') === '1') {
           if (authNullTimer) clearTimeout(authNullTimer);
-          state.currentUser = null;
-          state.authSettled = true;
-          render();
+          authNullTimer = setTimeout(() => {
+            authNullTimer = null;
+            if (!fbAuth.currentUser) {
+              state.currentUser = null;
+              state.authSettled = true;
+              render();
+            }
+          }, AUTH_RESTORE_GRACE_MS);
           return;
         }
 
-        if (authNullTimer) clearTimeout(authNullTimer);
-        authNullTimer = setTimeout(() => {
-          authNullTimer = null;
-          if (!fbAuth.currentUser) {
-            state.currentUser = null;
-            state.authSettled = true;
-            render();
-          }
-        }, authStartupGrace ? AUTH_STARTUP_GRACE_MS : 1500);
+        state.authSettled = true;
+        render();
       }
 
-      // IMPORTANT: set LOCAL persistence before registering the auth listener.
-      // This makes the Firebase session survive refreshes, tab closes and
-      // normal navigation on the GitHub Pages site.
+      // Set LOCAL persistence first, then listen for auth changes. This keeps
+      // Google accounts signed in across refreshes and normal navigation.
       fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
         .then(() => {
-          // Check the restored session immediately before listening for changes.
-          if (fbAuth.currentUser) applyAuthUser(fbAuth.currentUser);
-
           fbAuth.onAuthStateChanged(user => applyAuthUser(user));
-
-          // Give redirect sign-in a chance to restore the same persistent session.
           return fbAuth.getRedirectResult();
         })
         .then(result => {
           if (result && result.user) applyAuthUser(result.user);
-          // If no user was restored, allow future genuine sign-outs to clear
-          // immediately after the startup grace period has elapsed.
-          setTimeout(() => { authStartupGrace = false; }, AUTH_STARTUP_GRACE_MS);
         })
         .catch(err => {
           console.warn('Auth restore error:', err);
-          authStartupGrace = false;
+          state.authSettled = true;
+          render();
         });
     } else {
       state.authSettled = true;
@@ -1023,43 +1009,38 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   function toggleAccounts(show){ playSFX('click'); state.showAccounts = show; render(); }
 
   function signInWithGoogle(){
-    if(!fbReady){ render(); return; }
-    playSFX('click');
-    const provider = new firebase.auth.GoogleAuthProvider();
-
-    // Popup first (works on most browsers). Redirect only if popup fails.
-    fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).then(() => {
-      return fbAuth.signInWithPopup(provider);
-    }).then(result => {
-      if(!result || !result.user) return;
-      const u = result.user;
-      state.currentUser = {
-        uid: u.uid,
-        name: u.displayName || 'Player',
-        photoURL: u.photoURL || '',
-        email: (u.email || '').toLowerCase(),
-        isOwner: emailIsOwner(u.email)
-      };
-      loadSavedProfile();
-      ensureUserDoc().catch(() => {});
-      state.signInBlocked = false;
+    if(!fbReady){
+      state.signInBlocked = true;
       render();
-    }).catch(err => {
-      console.warn('Popup sign-in failed:', err);
-      const msg = (err && err.message) || '';
-      const code = (err && err.code) || '';
-      const blockedIndicators = ['disallowed_useragent', 'operation-not-supported', 'popup-blocked', 'operation-not-allowed'];
-      const isBlocked = blockedIndicators.some(k => msg.indexOf(k) !== -1 || code.indexOf(k) !== -1);
-      // Try redirect as backup (page will reload and getRedirectResult restores user)
-      fbAuth.signInWithRedirect(provider).catch(redirectErr => {
-        console.warn('Redirect sign-in also failed:', redirectErr);
+      return;
+    }
+    playSFX('click');
+    state.signInBlocked = false;
+    render();
+
+    const provider = new firebase.auth.GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: 'select_account' });
+
+    // Redirect is the most reliable method on mobile Chrome/GitHub Pages and
+    // avoids popup blockers. LOCAL persistence is set before leaving the page.
+    fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
+      .then(() => fbAuth.signInWithRedirect(provider))
+      .catch(err => {
+        console.warn('Google redirect sign-in failed:', err);
+        // Some desktop browsers allow popups even when redirect is unavailable.
+        return fbAuth.signInWithPopup(provider);
+      })
+      .then(result => {
+        if(!result || !result.user) return;
+        applyAuthUser(result.user);
+        state.signInBlocked = false;
+        render();
+      })
+      .catch(err => {
+        console.warn('Google sign-in failed:', err);
         state.signInBlocked = true;
         render();
       });
-      if(isBlocked){
-        // Still attempt redirect above; mark blocked only if both fail
-      }
-    });
   }
 
   async function signOut(){
@@ -4357,21 +4338,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
   document.getElementById('versionTag').textContent = GAME_VERSION;
 
-  // Force-refresh if the WebView is serving a stale cached copy.
-  // version.json is tiny and fetched with cache disabled, so it's always fresh —
-  // if it doesn't match the version baked into this loaded page, reload with a cache-buster.
-  try {
-    fetch('version.json?t=' + Date.now(), { cache: 'no-store' })
-      .then(r => r.json())
-      .then(data => {
-        if(data && data.version && data.version !== GAME_VERSION){
-          const url = new URL(location.href);
-          url.searchParams.set('v', Date.now());
-          location.replace(url.toString());
-        }
-      })
-      .catch(() => {});
-  } catch(e){}
+  // Version is displayed in-page. Do not auto-reload from version.json: an
+  // old/missing version.json on GitHub Pages can otherwise create a reload loop
+  // that makes the whole site appear blank.
 
   loadSoundPref();
   const initBtn = document.getElementById('audioToggle');
