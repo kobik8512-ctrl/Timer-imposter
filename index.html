@@ -708,10 +708,17 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       fbReady = true;
       startOnlinePopulationSim();
 
+      // Firebase can briefly report null while restoring a LOCAL session.
+      // Never clear the account during that startup window. This was the main
+      // cause of users appearing logged out after refresh/navigation.
       let authNullTimer = null;
+      let authStartupGrace = true;
+      const AUTH_STARTUP_GRACE_MS = 8000;
+
       function applyAuthUser(user, forceNull){
         if (user) {
           if (authNullTimer) { clearTimeout(authNullTimer); authNullTimer = null; }
+          authStartupGrace = false;
           state.currentUser = {
             uid: user.uid,
             name: user.displayName || 'Player',
@@ -719,42 +726,61 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
             email: (user.email || '').toLowerCase(),
             isOwner: emailIsOwner(user.email)
           };
-          try { localStorage.setItem('ti_last_uid', user.uid); } catch(e){}
+          try {
+            localStorage.setItem('ti_last_uid', user.uid);
+            localStorage.setItem('ti_auth_seen', '1');
+          } catch(e){}
           loadSavedProfile();
           ensureUserDoc().catch(() => {});
           state.authSettled = true;
           render();
           return;
         }
-        // Firebase often fires null briefly while restoring LOCAL session — don't log out yet
-        if (!forceNull && state.currentUser) {
+
+        // A null event is NOT an automatic logout. Firebase may emit null
+        // before IndexedDB/local persistence has finished restoring the user.
+        if (forceNull) {
           if (authNullTimer) clearTimeout(authNullTimer);
-          authNullTimer = setTimeout(() => {
-            if (!fbAuth.currentUser) {
-              state.currentUser = null;
-              state.authSettled = true;
-              render();
-            }
-          }, 800);
+          state.currentUser = null;
+          state.authSettled = true;
+          render();
           return;
         }
-        state.currentUser = null;
-        state.authSettled = true;
-        render();
+
+        if (authNullTimer) clearTimeout(authNullTimer);
+        authNullTimer = setTimeout(() => {
+          authNullTimer = null;
+          if (!fbAuth.currentUser) {
+            state.currentUser = null;
+            state.authSettled = true;
+            render();
+          }
+        }, authStartupGrace ? AUTH_STARTUP_GRACE_MS : 1500);
       }
 
-      // LOCAL = stay logged in after refresh
+      // IMPORTANT: set LOCAL persistence before registering the auth listener.
+      // This makes the Firebase session survive refreshes, tab closes and
+      // normal navigation on the GitHub Pages site.
       fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
-        .catch(err => console.warn('Auth persistence:', err))
         .then(() => {
+          // Check the restored session immediately before listening for changes.
           if (fbAuth.currentUser) applyAuthUser(fbAuth.currentUser);
+
           fbAuth.onAuthStateChanged(user => applyAuthUser(user));
+
+          // Give redirect sign-in a chance to restore the same persistent session.
           return fbAuth.getRedirectResult();
         })
         .then(result => {
           if (result && result.user) applyAuthUser(result.user);
+          // If no user was restored, allow future genuine sign-outs to clear
+          // immediately after the startup grace period has elapsed.
+          setTimeout(() => { authStartupGrace = false; }, AUTH_STARTUP_GRACE_MS);
         })
-        .catch(err => console.warn('Auth restore error:', err));
+        .catch(err => {
+          console.warn('Auth restore error:', err);
+          authStartupGrace = false;
+        });
     } else {
       state.authSettled = true;
     }
@@ -1036,10 +1062,15 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     });
   }
 
-  function signOut(){
+  async function signOut(){
     playSFX('click');
-    if(fbReady) fbAuth.signOut();
+    try {
+      if(fbReady) await fbAuth.signOut();
+    } catch(e) {
+      console.warn('Sign out failed:', e);
+    }
     state.currentUser = null;
+    try { localStorage.removeItem('ti_auth_seen'); } catch(e){}
     leaveOnlineRoom();
     render();
   }
