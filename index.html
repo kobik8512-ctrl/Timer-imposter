@@ -556,7 +556,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v56";
+const GAME_VERSION = "v55";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -709,32 +709,9 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       startOnlinePopulationSim();
 
       let authNullTimer = null;
-      let authRestorePending = true; // true until we get a definitive user or confirmed null after grace period
-
-      // Optimistic restore from localStorage so refresh doesn't flash "logged out"
-      try {
-        const lastUid = localStorage.getItem('ti_last_uid');
-        const rawProfile = localStorage.getItem('ti_profile');
-        if (lastUid && rawProfile) {
-          const data = JSON.parse(rawProfile);
-          if (data && (data.name || data.username)) {
-            state.currentUser = {
-              uid: lastUid,
-              name: data.name || 'Player',
-              photoURL: data.photoURL || '',
-              email: '',
-              isOwner: false,
-              username: data.username || '',
-              _optimistic: true
-            };
-          }
-        }
-      } catch (e) {}
-
       function applyAuthUser(user, forceNull){
         if (user) {
           if (authNullTimer) { clearTimeout(authNullTimer); authNullTimer = null; }
-          authRestorePending = false;
           state.currentUser = {
             uid: user.uid,
             name: user.displayName || 'Player',
@@ -749,40 +726,29 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           render();
           return;
         }
-        // user === null
-        // Firebase often fires null briefly (or with delay) while restoring LOCAL session.
-        // Never clear the session immediately — always give IndexedDB/token restore time.
-        if (!forceNull && (state.currentUser || authRestorePending)) {
+        // Firebase often fires null briefly while restoring LOCAL session — don't log out yet
+        if (!forceNull && state.currentUser) {
           if (authNullTimer) clearTimeout(authNullTimer);
           authNullTimer = setTimeout(() => {
-            // Re-check the live Firebase user; only log out if still truly gone
             if (!fbAuth.currentUser) {
-              authRestorePending = false;
               state.currentUser = null;
-              try { localStorage.removeItem('ti_last_uid'); } catch(e){}
               state.authSettled = true;
               render();
-            } else {
-              // Session appeared during the grace window — apply it
-              applyAuthUser(fbAuth.currentUser);
             }
-          }, 2500); // longer grace: slow networks / mobile / PWA restore can take >1s
+          }, 800);
           return;
         }
-        authRestorePending = false;
         state.currentUser = null;
         state.authSettled = true;
         render();
       }
 
-      // LOCAL = stay logged in after refresh / return visits
+      // LOCAL = stay logged in after refresh
       fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
         .catch(err => console.warn('Auth persistence:', err))
         .then(() => {
-          // Register listener FIRST so we never miss the restored user event
-          fbAuth.onAuthStateChanged(user => applyAuthUser(user));
-          // Immediate check (sometimes currentUser is already available)
           if (fbAuth.currentUser) applyAuthUser(fbAuth.currentUser);
+          fbAuth.onAuthStateChanged(user => applyAuthUser(user));
           return fbAuth.getRedirectResult();
         })
         .then(result => {
@@ -1074,7 +1040,6 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
     playSFX('click');
     if(fbReady) fbAuth.signOut();
     state.currentUser = null;
-    try { localStorage.removeItem('ti_last_uid'); } catch(e){}
     leaveOnlineRoom();
     render();
   }
@@ -4382,16 +4347,15 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
   initBtn.textContent = state.soundEnabled ? '🔊' : '🔇';
   initBtn.classList.toggle('active', state.soundEnabled);
 
-  // Avoid the load glitch: wait for Firebase auth to settle before first paint.
-  // Optimistic localStorage user may already be set; give IndexedDB restore time.
-  // If auth never fires (or Firebase is disabled), still show the UI after a timeout.
+  // Avoid the load glitch: wait briefly for Firebase auth to settle before first paint.
+  // If auth never fires (or Firebase is disabled), still show the UI after a short timeout.
   if(fbReady && !state.authSettled){
     setTimeout(() => {
       if(!state.authSettled){
         state.authSettled = true;
         render();
       }
-    }, 1200);
+    }, 400);
   } else {
     render();
   }
