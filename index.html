@@ -556,7 +556,7 @@
 <div id="adminPanelRoot"></div>
 
 <script>
-const GAME_VERSION = "v56";
+const GAME_VERSION = "v57";
 const OWNER_EMAIL = "kobik8512@gmail.com";
 const BOT_CORE_NAMES = [
     'River','Sage','Ash','Quinn','Rowan','Blake','Cameron','Drew','Eden','Finley',
@@ -1031,10 +1031,15 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
         return fbAuth.signInWithPopup(provider);
       })
       .then(result => {
-        if(!result || !result.user) return;
-        applyAuthUser(result.user);
-        state.signInBlocked = false;
-        render();
+        // Redirect sign-in does not resolve with a user here; the page reloads
+        // and getRedirectResult()/onAuthStateChanged restores the account.
+        // Popup sign-in does resolve with a user, but onAuthStateChanged also
+        // handles it. Do not call applyAuthUser here because that helper is
+        // scoped to the Firebase initialization block.
+        if(result && result.user){
+          state.signInBlocked = false;
+          render();
+        }
       })
       .catch(err => {
         console.warn('Google sign-in failed:', err);
