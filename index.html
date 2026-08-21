@@ -709,9 +709,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
       startOnlinePopulationSim();
 
       let authNullTimer = null;
+      let authRestoring = true; // true until first real user OR grace period ends
+
       function applyAuthUser(user, forceNull){
         if (user) {
           if (authNullTimer) { clearTimeout(authNullTimer); authNullTimer = null; }
+          authRestoring = false;
           state.currentUser = {
             uid: user.uid,
             name: user.displayName || 'Player',
@@ -726,27 +729,33 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           render();
           return;
         }
-        // Firebase often fires null briefly while restoring LOCAL session — don't log out yet
-        if (!forceNull && state.currentUser) {
+        // Firebase often emits null once while LOCAL persistence is restoring after refresh.
+        // Never treat that as a real logout until the grace window ends (or signOut forces it).
+        if (!forceNull && (authRestoring || state.currentUser)) {
           if (authNullTimer) clearTimeout(authNullTimer);
           authNullTimer = setTimeout(() => {
+            authRestoring = false;
             if (!fbAuth.currentUser) {
               state.currentUser = null;
               state.authSettled = true;
               render();
+            } else {
+              applyAuthUser(fbAuth.currentUser);
             }
-          }, 800);
+          }, 2500);
           return;
         }
+        authRestoring = false;
         state.currentUser = null;
         state.authSettled = true;
         render();
       }
 
-      // LOCAL = stay logged in after refresh
+      // LOCAL = stay logged in after refresh / re-open
       fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL)
         .catch(err => console.warn('Auth persistence:', err))
         .then(() => {
+          // Prefer currentUser if already available
           if (fbAuth.currentUser) applyAuthUser(fbAuth.currentUser);
           fbAuth.onAuthStateChanged(user => applyAuthUser(user));
           return fbAuth.getRedirectResult();
@@ -755,6 +764,18 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
           if (result && result.user) applyAuthUser(result.user);
         })
         .catch(err => console.warn('Auth restore error:', err));
+
+      // Safety: if auth never settles, stop waiting after 4s
+      setTimeout(() => {
+        if (!state.authSettled) {
+          authRestoring = false;
+          if (fbAuth.currentUser) applyAuthUser(fbAuth.currentUser);
+          else {
+            state.authSettled = true;
+            render();
+          }
+        }
+      }, 4000);
     } else {
       state.authSettled = true;
     }
@@ -1038,9 +1059,12 @@ let fbApp = null, fbAuth = null, fbDb = null, fbReady = false;
 
   function signOut(){
     playSFX('click');
-    if(fbReady) fbAuth.signOut();
     state.currentUser = null;
     leaveOnlineRoom();
+    if(fbReady) {
+      fbAuth.signOut().catch(() => {});
+    }
+    state.authSettled = true;
     render();
   }
 
